@@ -15,6 +15,7 @@ iPlayer is UK-only and needs a TV licence.
 """
 
 import atexit
+import collections
 import faulthandler
 import json
 import os
@@ -558,15 +559,18 @@ def find_new_link(ch):
 
 def build_country_playlist(countries, only_playable, replaced, bbc_channels=None):
     """An .m3u of several countries' channels, grouped by country. countries is a list of
-    (code, name, channels or None to download them). Returns (playlist text, channel count)."""
+    (code, name, channels or None to download them, set of categories or None for all).
+    Returns (playlist text, channel count)."""
     lines = ["#EXTM3U"]
     if bbc_channels is not None:
         lines += build_live_playlist(bbc_channels or load_live_channels())[0].splitlines()[1:]
-    for code, name, channels in countries:
+    for code, name, channels, categories in countries:
         if channels is None:
             channels = load_country_channels(code)[0]
-            for ch in channels:
-                ch["url"] = replaced.get(ch["url"], ch["url"])
+        for ch in channels:
+            ch["url"] = replaced.get(ch["url"], ch["url"])
+        if categories is not None:
+            channels = [ch for ch in channels if categories & {g.strip() for g in ch["group"].split(",")}]
         if only_playable:
             results = check_all([ch for ch in channels if ch.get("status") not in CHECKED])
             channels = [ch for ch in channels if results.get(ch["id"], ch.get("status")) == "ok"]
@@ -1504,32 +1508,113 @@ class App(tk.Tk):
         win.title("Make a VLC playlist")
         win.transient(self)
         win.resizable(False, False)
-        ttk.Label(win, text="Countries to include:").grid(row=0, column=0, columnspan=3, sticky="w", padx=10, pady=(10, 4))
-        picks = {}
+        left = ttk.Frame(win)
+        left.grid(row=0, column=0, sticky="nw", padx=10, pady=10)
+        right = ttk.Frame(win)
+        right.grid(row=0, column=1, sticky="ns", padx=(6, 10), pady=10)
+
+        ttk.Label(left, text="Countries to include:").grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
+        rows = {}
         for i, (code, tab) in enumerate(self.country_tabs.items()):
-            picks[code] = tk.BooleanVar(value=code == preselect)
-            ttk.Checkbutton(win, text=tab.name, variable=picks[code]).grid(
-                row=1 + i // 3, column=i % 3, sticky="w", padx=(18, 10), pady=2)
-        row = 2 + (len(picks) - 1) // 3
+            rows[code] = r = {"name": tab.name, "pick": tk.BooleanVar(value=code == preselect),
+                              "channels": tab.channels or None, "groups": [], "counts": {},
+                              "chosen": None,  # None = every category
+                              "summary": ttk.Label(left, text="Loading...", foreground="#555", width=24)}
+            ttk.Checkbutton(left, text=tab.name, variable=r["pick"]).grid(row=1 + i, column=0, sticky="w",
+                                                                         padx=(8, 6), pady=2)
+            r["summary"].grid(row=1 + i, column=1, sticky="w")
+            ttk.Button(left, text="Categories ›", command=lambda c=code: show_categories(c)).grid(
+                row=1 + i, column=2, padx=(6, 0))
+        n = len(rows)
         bbc = tk.BooleanVar(value=False)
-        ttk.Checkbutton(win, text="BBC live channels (from the Live BBC TV tab)", variable=bbc).grid(
-            row=row, column=0, columnspan=3, sticky="w", padx=10, pady=(10, 2))
+        ttk.Checkbutton(left, text="BBC live channels (from the Live BBC TV tab)", variable=bbc).grid(
+            row=n + 1, column=0, columnspan=3, sticky="w", pady=(12, 2))
         only_ok = tk.BooleanVar(value=True)
-        ttk.Checkbutton(win, text="Only channels that play here", variable=only_ok).grid(
-            row=row + 1, column=0, columnspan=3, sticky="w", padx=10, pady=2)
-        ttk.Label(win, foreground="#555", text="Add more countries with the + tab. Each country shows as its own "
-                  "group in VLC (Ctrl+L).", wraplength=380).grid(row=row + 2, column=0, columnspan=3, sticky="w", padx=10)
-        buttons = ttk.Frame(win)
-        buttons.grid(row=row + 3, column=0, columnspan=3, sticky="e", padx=10, pady=10)
-        ttk.Button(buttons, text="All", width=6, command=lambda: [v.set(True) for v in picks.values()]).pack(side="left")
-        ttk.Button(buttons, text="None", width=6, command=lambda: [v.set(False) for v in picks.values()]).pack(side="left", padx=4)
+        ttk.Checkbutton(left, text="Only channels that play here", variable=only_ok).grid(
+            row=n + 2, column=0, columnspan=3, sticky="w", pady=2)
+        ttk.Label(left, foreground="#555", wraplength=380, justify="left", text=(
+            "Add more countries with the + tab. Each country shows as its own group in VLC (Ctrl+L).")).grid(
+            row=n + 3, column=0, columnspan=3, sticky="w", pady=(4, 0))
+
+        cat_title = ttk.Label(right, text="Categories")
+        cat_title.pack(anchor="w")
+        lists = ttk.Frame(right)
+        lists.pack(fill="both", expand=True, pady=4)
+        cat_list = tk.Listbox(lists, selectmode="multiple", exportselection=False, width=34, height=16,
+                              activestyle="none")
+        scroll = ttk.Scrollbar(lists, orient="vertical", command=cat_list.yview)
+        cat_list.configure(yscrollcommand=scroll.set)
+        cat_list.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="left", fill="y")
+        cat_buttons = ttk.Frame(right)
+        cat_buttons.pack(anchor="w")
+        ttk.Label(right, foreground="#555", text="Click categories to tick or untick them.").pack(anchor="w", pady=(4, 0))
+        current = [preselect if preselect in rows else next(iter(rows), None)]
+
+        def summary(code):
+            r = rows[code]
+            chosen, total = r["chosen"], len(r["groups"])
+            if chosen is None or len(chosen) == total:
+                text = "All categories"
+            elif not chosen:
+                text = "No categories"
+            elif len(chosen) == 1:
+                text = next(iter(chosen))
+            else:
+                text = f"{len(chosen)} of {total} categories"
+            r["summary"].configure(text=text)
+
+        def show_categories(code):
+            current[0] = code
+            r = rows[code]
+            cat_title.configure(text=f"{r['name']} categories" + ("" if r["groups"] else " (loading...)"))
+            cat_list.delete(0, "end")
+            for g in r["groups"]:
+                cat_list.insert("end", f"{g} ({r['counts'][g]})")
+                if r["chosen"] is None or g in r["chosen"]:
+                    cat_list.selection_set("end")
+
+        def on_select(_event=None):
+            r = rows[current[0]]
+            if not r["groups"]:
+                return
+            r["chosen"] = {r["groups"][i] for i in cat_list.curselection()}
+            if r["chosen"]:
+                r["pick"].set(True)
+            summary(current[0])
+
+        def select_all(on):
+            (cat_list.selection_set if on else cat_list.selection_clear)(0, "end")
+            on_select()
+        cat_list.bind("<<ListboxSelect>>", on_select)
+        ttk.Button(cat_buttons, text="All", width=6, command=lambda: select_all(True)).pack(side="left")
+        ttk.Button(cat_buttons, text="None", width=6, command=lambda: select_all(False)).pack(side="left", padx=4)
+
+        def got(code, channels):
+            if not win.winfo_exists():
+                return
+            r = rows[code]
+            r["channels"] = channels
+            r["counts"] = collections.Counter(g.strip() for ch in channels for g in ch["group"].split(","))
+            r["groups"] = sorted(r["counts"])
+            summary(code)
+            if current[0] == code:
+                show_categories(code)
+        for code, r in rows.items():
+            if r["channels"]:
+                got(code, r["channels"])
+            else:  # tab not opened yet: fetch its list just for the categories
+                self.run_bg(lambda c=code: load_country_channels(c)[0], lambda chs, c=code: got(c, chs),
+                            f"Loading {r['name']} categories...")
+        if current[0]:
+            show_categories(current[0])
 
         def save():
-            codes = [code for code, v in picks.items() if v.get()]
-            if not codes and not bbc.get():
-                messagebox.showinfo(APP_NAME, "Tick at least one country.", parent=win)
+            chosen = [(code, r) for code, r in rows.items() if r["pick"].get() and r["chosen"] != set()]
+            if not chosen and not bbc.get():
+                messagebox.showinfo(APP_NAME, "Tick at least one country with at least one category.", parent=win)
                 return
-            names = [self.country_tabs[c].name for c in codes] + (["BBC"] if bbc.get() else [])
+            names = [r["name"] for _, r in chosen] + (["BBC"] if bbc.get() else [])
             path = filedialog.asksaveasfilename(
                 parent=win, title="Save VLC playlist", initialdir=self.save_dir.get() or str(Path.home()),
                 initialfile=(names[0] if len(names) == 1 else "World") + " TV.m3u", defaultextension=".m3u",
@@ -1537,7 +1622,9 @@ class App(tk.Tk):
             if not path:
                 return
             win.destroy()
-            countries = [(c, self.country_tabs[c].name, self.country_tabs[c].channels or None) for c in codes]
+            countries = [(code, r["name"], r["channels"],
+                          None if r["chosen"] is None or len(r["chosen"]) == len(r["groups"]) else set(r["chosen"]))
+                         for code, r in chosen]
             bbc_channels = list(self.live) if bbc.get() else None
             replaced, playable = dict(self.cfg.get("replaced_links", {})), only_ok.get()
 
@@ -1551,7 +1638,8 @@ class App(tk.Tk):
                     subprocess.Popen([vlc, path])
             self.run_bg(lambda: build_country_playlist(countries, playable, replaced, bbc_channels), saved,
                         "Building playlist" + (" and checking streams..." if playable else "..."))
-        ttk.Button(buttons, text="Save playlist...", command=save).pack(side="left", padx=(16, 0))
+        ttk.Button(left, text="Save playlist...", command=save).grid(row=n + 4, column=0, columnspan=3, sticky="e",
+                                                                    pady=(12, 0))
 
     def _rec_view(self, cid):
         if ":" in cid:

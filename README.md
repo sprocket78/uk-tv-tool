@@ -97,7 +97,11 @@ Double-click a result:
   - Replacement links are remembered.
 - Type in **Filter** to find a channel by name, or pick a category.
 - **Watch in VLC** (or double-click), **Copy link** and **● Record** / **■ Stop** work as on the BBC tab.
-- **VLC playlist...** builds one playlist from any of your countries. Tick the countries you want, plus the BBC live channels if you like. Each country becomes its own group in VLC's playlist (Ctrl+L). Keep **Only channels that play here** ticked to leave out blocked and offline streams.
+- **VLC playlist...** builds one playlist from any of your countries:
+  - Tick the countries you want, plus the BBC live channels if you like.
+  - To choose categories, press a country's **Categories ›** button. Its categories appear on the right with channel counts; click to tick or untick them (e.g. just News and Kids). Each country remembers its own choice for this playlist.
+  - Keep **Only channels that play here** ticked to leave out blocked and offline streams.
+  - Each country becomes its own group in VLC's playlist (Ctrl+L).
 - **Adding a country:** click the **+** tab, type a country's name, then double-click it. **Removing one:** right-click its tab and choose **Close**. Your tabs are remembered.
 - **Unofficial streams are left out.** These are rebroadcasts of paid or DRM-protected channels on third-party servers. The app recognises them by:
   - server: known rebroadcast sites, and streams served from a bare IP address;
