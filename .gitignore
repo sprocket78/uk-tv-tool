@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+
+# Recordings, downloads and generated playlists
+*.mp4
+*.ts
+*.m4a
+*.m4v
+*.srt
+*.m3u
+*.log
