@@ -83,9 +83,21 @@ Double-click a result:
 
 ### Country tabs
 
-- Each country tab lists the free live channels from the [iptv-org](https://github.com/iptv-org/iptv) project, loaded fresh when you first open the tab. **Refresh** reloads it.
+- Each country tab lists the free live channels from the [iptv-org](https://github.com/iptv-org/iptv) project, loaded fresh when you first open the tab.
+- **Plays here?** Every stream is tried from your connection, down to the first bytes of video:
+  - 🟢 **Plays here**
+  - 🔴 **Region-locked – needs VPN**: the stream only plays inside its own country. A VPN set to that country may help.
+  - 🔴 **Blocked here**: the stream refused your connection for another reason.
+  - ⚪ **Offline**: the link is dead or expired.
+
+  Tick **Only ones that play here** to hide the rest.
+- **Dead or expired links:**
+  - **Update links** downloads the latest list (iptv-org updates it daily) and checks every stream again.
+  - **Find new links** searches iptv-org's worldwide list for other links to each red or grey channel, and swaps in the first that plays here. Right-click a channel and choose **Find a new link** to do just that one.
+  - Replacement links are remembered.
 - Type in **Filter** to find a channel by name, or pick a category.
-- **Watch in VLC** (or double-click), **Copy link**, **● Record** / **■ Stop** and **Save VLC playlist** work as on the BBC tab. A playlist holds the channels currently shown, so filter first to save just those.
+- **Watch in VLC** (or double-click), **Copy link** and **● Record** / **■ Stop** work as on the BBC tab.
+- **VLC playlist...** builds one playlist from any of your countries. Tick the countries you want, plus the BBC live channels if you like. Each country becomes its own group in VLC's playlist (Ctrl+L). Keep **Only channels that play here** ticked to leave out blocked and offline streams.
 - **Adding a country:** click the **+** tab, type a country's name, then double-click it. **Removing one:** right-click its tab and choose **Close**. Your tabs are remembered.
 - **Unofficial streams are left out.** These are rebroadcasts of paid or DRM-protected channels on third-party servers. The app recognises them by:
   - server: known rebroadcast sites, and streams served from a bare IP address;
