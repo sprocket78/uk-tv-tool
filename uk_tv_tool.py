@@ -6,6 +6,8 @@
   Only BBC programmes can be downloaded; the others open on their own sites.
 * Live BBC TV: now/next, watch in a browser or VLC, record, copy manifest
   links, save a VLC playlist.
+* A tab per country of free live channels from the iptv-org lists, with the
+  same watch, record, copy and playlist tools. Add countries with the + tab.
 
 BBC iPlayer streams are not DRM-protected; this tool only fetches what the
 public iPlayer site serves. It does not decrypt DRM-protected services.
@@ -46,6 +48,7 @@ trace(f"starting: {sys.executable} {sys.version.split()[0]} cwd={os.getcwd()}")
 atexit.register(lambda: trace("exited"))
 
 import glob  # noqa: E402
+import ipaddress  # noqa: E402
 import queue  # noqa: E402
 import re  # noqa: E402
 import shutil  # noqa: E402
@@ -55,6 +58,7 @@ import tkinter as tk  # noqa: E402
 import urllib.parse  # noqa: E402
 import urllib.request  # noqa: E402
 import webbrowser  # noqa: E402
+import zlib  # noqa: E402
 from concurrent.futures import ThreadPoolExecutor  # noqa: E402
 from datetime import datetime, timezone  # noqa: E402
 from tkinter import filedialog, messagebox, ttk  # noqa: E402
@@ -362,27 +366,97 @@ def live_dash_url(channel_id):
     return _live_manifest(channel_id, "iptv-all", "dash")
 
 
-def live_stream_urls(channel_id):
-    """Return (master playlist, best video playlist, main audio playlist or None) for a live channel."""
-    master = _live_manifest(channel_id, "pc", "hls")
+def stream_parts(master):
+    """Return (master, best video playlist, main audio playlist or None) for an HLS master playlist.
+    Anything else (a DASH manifest, a single-quality playlist) comes back as the master itself."""
     req = urllib.request.Request(master, headers=BROWSER_HEADERS)
-    lines = urllib.request.urlopen(req, timeout=20).read().decode("utf-8", "replace").splitlines()
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        base = resp.geturl()  # some lists link through a redirect
+        lines = resp.read(2_000_000).decode("utf-8", "replace").splitlines()
     audio, best = {}, None
     for i, line in enumerate(lines):
-        if line.startswith("#EXT-X-MEDIA:") and "TYPE=AUDIO" in line:
+        if line.startswith("#EXT-X-MEDIA:") and "TYPE=AUDIO" in line and "URI=" in line:
             a = _m3u8_attrs(line)
             if "describes-video" in a.get("CHARACTERISTICS", ""):  # skip audio description
                 continue
             if a.get("DEFAULT") == "YES" or a.get("GROUP-ID") not in audio:
-                audio[a.get("GROUP-ID")] = urllib.parse.urljoin(master, a["URI"])
+                audio[a.get("GROUP-ID")] = urllib.parse.urljoin(base, a["URI"])
         elif line.startswith("#EXT-X-STREAM-INF:") and i + 1 < len(lines):
             a = _m3u8_attrs(line)
-            bw = int(a.get("BANDWIDTH", 0))
+            bw = int(a.get("BANDWIDTH", 0) or 0)
             if best is None or bw > best[0]:
-                best = (bw, urllib.parse.urljoin(master, lines[i + 1].strip()), a.get("AUDIO"))
+                best = (bw, urllib.parse.urljoin(base, lines[i + 1].strip()), a.get("AUDIO"))
     if not best:
         return master, master, None
     return master, best[1], audio.get(best[2])
+
+
+def live_stream_urls(channel_id):
+    """Return (master playlist, best video playlist, main audio playlist or None) for a live BBC channel."""
+    return stream_parts(_live_manifest(channel_id, "pc", "hls"))
+
+
+# ---------------------------------------------------------------- free channels by country
+# Channel lists come from the iptv-org project, which collects publicly available streams by country.
+
+IPTV_ORG = "https://iptv-org.github.io"
+DEFAULT_COUNTRIES = [["UK", "UK"], ["IE", "Ireland"], ["FR", "France"], ["DE", "Germany"], ["US", "USA"]]
+# Sites that rebroadcast paid or DRM-protected channels without permission. Their streams are left out,
+# as are streams served from a bare IP address or that need a faked referrer or browser identity.
+UNOFFICIAL_HOSTS = {
+    "aynascope.net", "aynaott.com", "anixa.tv", "antik.sk", "cammonitorplus.net", "etvhosts.site",
+    "filegear-sg.me", "freeott.top", "githubusercontent.com", "hopslan.com", "iptvnetwork.net",
+    "mcquack.net", "stmify.com", "team-tv.co",
+}
+EXTINF_RE = re.compile(r'#EXTINF:-?[\d.]+((?:\s+[\w-]+="[^"]*")*)\s*,(.*)')
+CHANNEL_NAME_RE = re.compile(r"(.*?)(?:\s*\((\d+[pi])\))?((?:\s*\[[^\]]+\])*)\s*$")
+
+
+def load_countries():
+    """{code: name} for every country iptv-org has a list for."""
+    return {c["code"]: c["name"] for c in get_json(f"{IPTV_ORG}/api/countries.json")}
+
+
+def _unofficial(url, options):
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        pass
+    return bool(options) or any(host == h or host.endswith("." + h) for h in UNOFFICIAL_HOSTS)
+
+
+def load_country_channels(code):
+    """Return (channels, number left out as unofficial) for one country."""
+    req = urllib.request.Request(f"{IPTV_ORG}/iptv/countries/{code.lower()}.m3u", headers=BROWSER_HEADERS)
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        lines = resp.read().decode("utf-8", "replace").splitlines()
+    channels, skipped, info, options, seen = [], 0, None, [], set()
+    for line in lines:
+        line = line.strip()
+        if line.startswith("#EXTINF"):
+            info, options = EXTINF_RE.match(line), []
+        elif line.startswith("#EXTVLCOPT"):
+            options.append(line)
+        elif line and not line.startswith("#") and info:
+            if _unofficial(line, options):
+                skipped += 1
+            elif line not in seen:
+                seen.add(line)
+                attrs = dict(re.findall(r'([\w-]+)="([^"]*)"', info.group(1)))
+                title, quality, notes = CHANNEL_NAME_RE.match(info.group(2).strip()).groups()
+                group = attrs.get("group-title", "")
+                channels.append({
+                    # Keyed by stream so a refresh doesn't mix up recordings in progress.
+                    "id": f"{code}:{zlib.crc32(line.encode()):08x}", "title": title or info.group(2), "url": line,
+                    "group": "Other" if group in ("", "Undefined") else group.replace(";", ", "),
+                    "quality": quality or "", "notes": ", ".join(re.findall(r"\[([^\]]+)\]", notes)),
+                    "now_title": "",
+                })
+            info = None
+    channels.sort(key=lambda ch: ch["title"].lower())
+    return channels, skipped
 
 
 def copy_to_windows_clipboard(text):
@@ -467,7 +541,12 @@ class LiveRecorder(threading.Thread):
             ffmpeg = find_any_ffmpeg()
             if not ffmpeg:
                 raise RuntimeError("ffmpeg not found")
-            _, video, audio = live_stream_urls(cid)
+            if "url" in self.channel:
+                # Many free channels tie their playlists to one session, so ffmpeg picks the best
+                # video and audio from the original link itself.
+                video, audio = self.channel["url"], None
+            else:
+                _, video, audio = live_stream_urls(cid)
             folder = Path(self.save_dir) / "Live"
             folder.mkdir(parents=True, exist_ok=True)
             label = f"{name} {time.strftime('%Y-%m-%d %H%M')}"
@@ -483,7 +562,7 @@ class LiveRecorder(threading.Thread):
             if self.minutes:
                 cmd += ["-t", str(int(self.minutes * 60))]
             cmd += ["-f", "mpegts", ts]
-            err_path = CONFIG_PATH.parent / f"ffmpeg-{cid}.log"
+            err_path = CONFIG_PATH.parent / f"ffmpeg-{cid.replace(':', '-')}.log"
             no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             with open(err_path, "wb") as err:
                 proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=err,
@@ -518,7 +597,8 @@ class LiveRecorder(threading.Thread):
                 saved = mp4
             self.emit("rec_done", cid, f"Recorded {elapsed // 60}:{elapsed % 60:02d} of {name}: {saved}")
         except Exception as exc:
-            self.emit("rec_done", cid, f"Recording {name} failed: {exc}")
+            hint = " (the stream may be offline or blocked outside its country)" if "url" in self.channel else ""
+            self.emit("rec_done", cid, f"Recording {name} failed{hint}: {exc}")
 
 
 # ---------------------------------------------------------------- config
@@ -528,6 +608,7 @@ def load_config():
         "save_dir": str(Path.home() / "Videos" / "iPlayer"),
         "quality": "1080p",
         "subtitles": True,
+        "countries": DEFAULT_COUNTRIES,
     }
     try:
         defaults.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
@@ -709,6 +790,149 @@ class _QueueLogger:
 
 # ---------------------------------------------------------------- UI
 
+class CountryTab(ttk.Frame):
+    """One country's free live channels: filter, watch in VLC, copy links, record, save a playlist."""
+    ALL = "All categories"
+
+    def __init__(self, app, code, name):
+        super().__init__(app.tabs)
+        self.app, self.code, self.name = app, code, name
+        self.channels, self.loaded = [], False
+        pad = {"padx": 8, "pady": 4}
+
+        top = ttk.Frame(self)
+        top.pack(fill="x", **pad)
+        ttk.Label(top, text="Filter:").pack(side="left")
+        self.filter = tk.StringVar()
+        self.filter.trace_add("write", lambda *_: self.show())
+        ttk.Entry(top, textvariable=self.filter, width=22).pack(side="left", padx=4)
+        self.category = tk.StringVar(value=self.ALL)
+        self.category_box = ttk.Combobox(top, textvariable=self.category, values=[self.ALL], width=18,
+                                         state="readonly")
+        self.category_box.pack(side="left", padx=4)
+        self.category_box.bind("<<ComboboxSelected>>", lambda e: self.show())
+        ttk.Button(top, text="Refresh", command=self.load).pack(side="left", padx=(8, 0))
+        ttk.Button(top, text="Watch in VLC", command=self.watch_in_vlc,
+                   state="normal" if find_vlc() else "disabled").pack(side="left", padx=(12, 0))
+        ttk.Button(top, text="Copy link", command=self.copy_link).pack(side="left", padx=4)
+        ttk.Button(top, text="Save VLC playlist", command=self.save_playlist).pack(side="left", padx=4)
+        ttk.Label(top, text="    Record for").pack(side="left")
+        self.rec_minutes = tk.StringVar(value="0")
+        ttk.Spinbox(top, from_=0, to=600, increment=15, width=5, textvariable=self.rec_minutes).pack(side="left", padx=4)
+        ttk.Label(top, text="min").pack(side="left")
+        ttk.Button(top, text="● Record", command=self.start_recording).pack(side="left", padx=(12, 0))
+        ttk.Button(top, text="■ Stop", command=self.stop_recording).pack(side="left", padx=4)
+
+        cols = ("channel", "category", "quality", "notes", "rec")
+        self.tree = ttk.Treeview(self, columns=cols, show="headings", selectmode="browse")
+        for col, text, width, stretch in (("channel", "Channel", 330, True), ("category", "Category", 200, False),
+                                          ("quality", "Quality", 70, False), ("notes", "Notes", 160, False),
+                                          ("rec", "Recording", 150, False)):
+            self.tree.heading(col, text=text)
+            self.tree.column(col, width=width, stretch=stretch)
+        self.tree.pack(fill="both", expand=True, **pad)
+        self.tree.bind("<Double-1>", lambda e: self.watch_in_vlc() if find_vlc() else self.copy_link())
+
+        menu = tk.Menu(self, tearoff=False)
+        menu.add_command(label="Watch in VLC", command=self.watch_in_vlc, state="normal" if find_vlc() else "disabled")
+        menu.add_command(label="Copy stream link", command=self.copy_link)
+        menu.add_separator()
+        menu.add_command(label="Record", command=self.start_recording)
+        menu.add_command(label="Stop recording", command=self.stop_recording)
+
+        def popup(event):
+            row = self.tree.identify_row(event.y)
+            if row:
+                self.tree.selection_set(row)
+                menu.tk_popup(event.x_root, event.y_root)
+        self.tree.bind("<Button-3>", popup)
+
+        self.note = ttk.Label(self, foreground="#555", wraplength=1000, justify="left")
+        self.note.pack(anchor="w", **pad)
+
+    def load(self):
+        self.loaded = True
+        self.app.run_bg(lambda: load_country_channels(self.code), self._loaded,
+                        f"Loading {self.name} channels...")
+
+    def _loaded(self, outcome):
+        self.channels, skipped = outcome
+        groups = sorted({g.strip() for ch in self.channels for g in ch["group"].split(",")})
+        self.category_box.configure(values=[self.ALL] + groups)
+        if self.category.get() not in groups:
+            self.category.set(self.ALL)
+        self.show()
+        self.app.status.configure(text=f"{len(self.channels)} {self.name} channels")
+        self.note.configure(text=(
+            f"{len(self.channels)} free channels listed by the iptv-org project (github.com/iptv-org/iptv)"
+            + (f"; {skipped} unofficial rebroadcasts left out" if skipped else "")
+            + ". Streams come and go: some may be offline, and those marked Geo-blocked only play from inside "
+            "their country. Recordings go in the \"Live\" folder inside your save folder."))
+
+    def show(self):
+        selected = self.tree.selection()
+        text, category = self.filter.get().strip().lower(), self.category.get()
+        self.tree.delete(*self.tree.get_children())
+        for ch in self.channels:
+            if text and text not in ch["title"].lower():
+                continue
+            if category != self.ALL and category not in [g.strip() for g in ch["group"].split(",")]:
+                continue
+            rec = self.app.recorders.get(ch["id"])
+            self.tree.insert("", "end", iid=ch["id"], values=(
+                ch["title"], ch["group"], ch["quality"], ch["notes"], "● REC" if rec and rec.is_alive() else ""))
+        if selected and self.tree.exists(selected[0]):
+            self.tree.selection_set(selected[0])
+
+    def selected(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo(APP_NAME, "Pick a channel first.")
+            return None
+        return next(ch for ch in self.channels if ch["id"] == sel[0])
+
+    def watch_in_vlc(self):
+        ch, vlc = self.selected(), find_vlc()
+        if ch and vlc:
+            subprocess.Popen([vlc, ch["url"], f":meta-title={ch['title']}"])
+            self.app.status.configure(text=f"Opened {ch['title']} in VLC")
+
+    def copy_link(self):
+        ch = self.selected()
+        if ch:
+            self.app._copy(ch["url"], f"{ch['title']} stream link")
+
+    def save_playlist(self):
+        if not self.channels:
+            messagebox.showinfo(APP_NAME, "Wait for the channel list to load, then try again.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Save VLC playlist", initialdir=self.app.save_dir.get() or str(Path.home()),
+            initialfile=f"{self.name} TV.m3u", defaultextension=".m3u",
+            filetypes=[("Playlist", "*.m3u"), ("All files", "*.*")])
+        if not path:
+            return
+        shown = [ch for ch in self.channels if self.tree.exists(ch["id"])]
+        lines = ["#EXTM3U"]
+        for ch in shown:
+            lines += [f'#EXTINF:-1 group-title="{ch["group"]}",{ch["title"]}', ch["url"]]
+        Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.app.log(f"Saved VLC playlist with {len(shown)} {self.name} channels: {path}")
+        vlc = find_vlc()
+        if vlc and messagebox.askyesno(APP_NAME, f"Saved {len(shown)} channels.\n\nOpen the playlist in VLC now?"):
+            subprocess.Popen([vlc, path])
+
+    def start_recording(self):
+        ch = self.selected()
+        if ch:
+            self.app.record(ch, self.rec_minutes.get(), self.tree)
+
+    def stop_recording(self):
+        ch = self.selected()
+        if ch:
+            self.app.stop_record(ch, self.tree)
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -724,6 +948,8 @@ class App(tk.Tk):
         self.everywhere_results = []
         self.live = []
         self.recorders = {}
+        self.country_tabs = {}
+        self.countries = {}  # every country iptv-org lists, loaded when adding a tab
 
         self._build()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -745,7 +971,13 @@ class App(tk.Tk):
         self.tabs.add(everywhere_tab, text="  Search all channels  ")
         self.live_tab = ttk.Frame(self.tabs)
         self.tabs.add(self.live_tab, text="  Live BBC TV  ")
+        for code, name in self.cfg["countries"]:
+            self._add_country_tab(code, name)
+        self.add_tab = ttk.Frame(self.tabs)
+        self.tabs.add(self.add_tab, text="  +  ")
+        self._last_tab = str(self.iplayer_tab)
         self.tabs.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+        self.tabs.bind("<Button-3>", self._on_tab_right_click)
         self._build_everywhere(everywhere_tab, pad)
         self._build_live(self.live_tab, pad)
 
@@ -924,8 +1156,109 @@ class App(tk.Tk):
         return menu
 
     def _on_tab_changed(self, _event):
-        if self.tabs.select() == str(self.live_tab) and not self.live:
+        current = self.tabs.select()
+        if current == str(self.live_tab) and not self.live:
             self.refresh_live()
+        elif current == str(self.add_tab):
+            self.tabs.select(self._last_tab)
+            self.after_idle(self.choose_country)
+            return
+        else:
+            tab = next((t for t in self.country_tabs.values() if str(t) == current), None)
+            if tab and not tab.loaded:
+                tab.load()
+        self._last_tab = current
+
+    # -- country tabs
+    def _add_country_tab(self, code, name):
+        tab = CountryTab(self, code, name)
+        self.country_tabs[code] = tab
+        if hasattr(self, "add_tab"):
+            self.tabs.insert(self.add_tab, tab, text=f"  {name}  ")
+        else:
+            self.tabs.add(tab, text=f"  {name}  ")
+        return tab
+
+    def _save_countries(self):
+        self.cfg["countries"] = [[t.code, t.name] for t in self.country_tabs.values()]
+        self._snapshot_cfg()
+
+    def choose_country(self):
+        if not self.countries:
+            def got(countries):
+                self.countries = countries
+                self.choose_country()
+            self.run_bg(load_countries, got, "Loading countries...")
+            return
+        win = tk.Toplevel(self)
+        win.title("Add a country")
+        win.transient(self)
+        win.geometry("320x420")
+        ttk.Label(win, text="Type to search, then double-click a country:").pack(anchor="w", padx=8, pady=(8, 2))
+        query = tk.StringVar()
+        entry = ttk.Entry(win, textvariable=query)
+        entry.pack(fill="x", padx=8)
+        box = tk.Listbox(win, activestyle="dotbox")
+        box.pack(fill="both", expand=True, padx=8, pady=6)
+        choices = []
+
+        def refresh(*_):
+            q = query.get().strip().lower()
+            choices[:] = sorted((name, code) for code, name in self.countries.items()
+                                if code not in self.country_tabs and (q in name.lower() or q == code.lower()))
+            box.delete(0, "end")
+            for name, _ in choices:
+                box.insert("end", name)
+            if choices:
+                box.selection_set(0)
+
+        def pick(*_):
+            sel = box.curselection()
+            if not sel:
+                return
+            name, code = choices[sel[0]]
+            win.destroy()
+            short = {"United Kingdom": "UK", "United States": "USA"}.get(name, name)
+            self.tabs.select(self._add_country_tab(code, short))
+            self._save_countries()
+        query.trace_add("write", refresh)
+        entry.bind("<Return>", pick)
+        entry.bind("<Down>", lambda e: box.focus_set())
+        box.bind("<Double-1>", pick)
+        box.bind("<Return>", pick)
+        ttk.Button(win, text="Add tab", command=pick).pack(pady=(0, 8))
+        refresh()
+        entry.focus_set()
+
+    def _on_tab_right_click(self, event):
+        try:
+            index = self.tabs.index(f"@{event.x},{event.y}")
+        except tk.TclError:
+            return
+        tab = next((t for t in self.country_tabs.values() if self.tabs.index(t) == index), None)
+        if not tab:
+            return
+        menu = tk.Menu(self, tearoff=False)
+        menu.add_command(label=f"Close {tab.name} tab", command=lambda: self.close_country(tab))
+        menu.add_command(label="Add a country...", command=self.choose_country)
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def close_country(self, tab):
+        if any(r.is_alive() for cid, r in self.recorders.items() if cid.startswith(tab.code + ":")):
+            messagebox.showinfo(APP_NAME, f"Stop the {tab.name} recordings before closing the tab.")
+            return
+        if self.tabs.select() == str(tab):
+            self.tabs.select(self.live_tab)
+        self.tabs.forget(tab)
+        del self.country_tabs[tab.code]
+        tab.destroy()
+        self._save_countries()
+
+    def _rec_view(self, cid):
+        if ":" in cid:
+            tab = self.country_tabs.get(cid.split(":")[0])
+            return tab.tree if tab else None
+        return self.live_list
 
     def _on_close(self):
         active = [r for r in self.recorders.values() if r.is_alive()]
@@ -1111,30 +1444,34 @@ class App(tk.Tk):
 
     def start_recording(self):
         ch = self._selected_channel()
-        if not ch:
-            return
+        if ch:
+            self.record(ch, self.rec_minutes.get(), self.live_list)
+
+    def stop_recording(self):
+        ch = self._selected_channel()
+        if ch:
+            self.stop_record(ch, self.live_list)
+
+    def record(self, ch, minutes_text, view):
         if ch["id"] in self.recorders and self.recorders[ch["id"]].is_alive():
             messagebox.showinfo(APP_NAME, f"{ch['title']} is already recording.")
             return
         try:
-            minutes = max(0, int(float(self.rec_minutes.get() or 0)))
+            minutes = max(0, int(float(minutes_text or 0)))
         except ValueError:
             minutes = 0
         cfg = self._snapshot_cfg()
         rec = LiveRecorder(ch, minutes, cfg["save_dir"], self.events)
         self.recorders[ch["id"]] = rec
-        self.live_list.set(ch["id"], "rec", "Starting...")
+        view.set(ch["id"], "rec", "Starting...")
         self.log(f"Recording {ch['title']}" + (f" for {minutes} min" if minutes else " until you stop it"))
         rec.start()
 
-    def stop_recording(self):
-        ch = self._selected_channel()
-        if not ch:
-            return
+    def stop_record(self, ch, view):
         rec = self.recorders.get(ch["id"])
         if rec and rec.is_alive():
             rec.stop_event.set()
-            self.live_list.set(ch["id"], "rec", "Stopping...")
+            view.set(ch["id"], "rec", "Stopping...")
         else:
             messagebox.showinfo(APP_NAME, f"{ch['title']} isn't recording.")
 
@@ -1286,12 +1623,14 @@ class App(tk.Tk):
                     self.log(args[0])
                 elif kind == "rec":
                     cid, text = args
-                    if self.live_list.exists(cid):
-                        self.live_list.set(cid, "rec", text)
+                    view = self._rec_view(cid)
+                    if view and view.exists(cid):
+                        view.set(cid, "rec", text)
                 elif kind == "rec_done":
                     cid, text = args
-                    if self.live_list.exists(cid):
-                        self.live_list.set(cid, "rec", "")
+                    view = self._rec_view(cid)
+                    if view and view.exists(cid):
+                        view.set(cid, "rec", "")
                     self.log(text)
                 elif kind == "finished":
                     self.download_btn.configure(state="normal")

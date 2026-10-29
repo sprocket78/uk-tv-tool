@@ -5,8 +5,9 @@ A Windows desktop app for UK free-to-air TV:
 - **BBC iPlayer downloads.** Search iPlayer, tick episodes and download them in up to 1080p with subtitles.
 - **Search all channels.** One search across BBC iPlayer, ITVX, Channel 4, My5, STV Player and U.
 - **Live BBC TV.** See what's on now and next on 11 BBC channels. Watch in a browser or VLC, record, copy stream links, or save a VLC playlist.
+- **Country tabs.** Free live channels for the UK, Ireland, France, Germany and the USA, each in its own tab. Add any of 250 countries with the **+** tab.
 
-It only downloads content that is not DRM-protected, which means BBC iPlayer. Other broadcasters' programmes are found and linked to, never decrypted.
+It only downloads and records content that is not DRM-protected: BBC iPlayer and free, unencrypted live streams. Other broadcasters' programmes are found and linked to, never decrypted.
 
 ## Requirements
 
@@ -80,6 +81,19 @@ Double-click a result:
   - Files go into a `Live` folder inside the save folder.
   - Quitting the app finishes and saves any recordings in progress.
 
+### Country tabs
+
+- Each country tab lists the free live channels from the [iptv-org](https://github.com/iptv-org/iptv) project, loaded fresh when you first open the tab. **Refresh** reloads it.
+- Type in **Filter** to find a channel by name, or pick a category.
+- **Watch in VLC** (or double-click), **Copy link**, **● Record** / **■ Stop** and **Save VLC playlist** work as on the BBC tab. A playlist holds the channels currently shown, so filter first to save just those.
+- **Adding a country:** click the **+** tab, type a country's name, then double-click it. **Removing one:** right-click its tab and choose **Close**. Your tabs are remembered.
+- **Unofficial streams are left out.** These are rebroadcasts of paid or DRM-protected channels on third-party servers. The app recognises them by:
+  - server: known rebroadcast sites, and streams served from a bare IP address;
+  - headers: streams that need a faked referrer or browser identity.
+
+  The note under the list says how many were left out.
+- **Not every stream will play.** Streams come and go. Those marked *Geo-blocked* only play from inside their own country. Some entries are another country's version of a channel and won't play from the UK either.
+
 ## Troubleshooting
 
 - **Downloads start failing.** The BBC changes iPlayer from time to time. Update yt-dlp first:
@@ -96,4 +110,4 @@ Double-click a result:
 - 1080p needs get_iplayer. Without it, the app falls back to 720p and says so in the log.
 - No audio-described versions.
 - Only programmes currently on iPlayer can be listed or downloaded.
-- Live ITV, Channel 4 and Channel 5 aren't included, because their online streams use DRM. A Freeview network tuner (e.g. HDHomeRun) would be the way to add them later.
+- Live ITV, Channel 4 and Channel 5 aren't included, including in the UK tab, because their online streams use DRM. A Freeview network tuner (e.g. HDHomeRun) would be the way to add them later.
