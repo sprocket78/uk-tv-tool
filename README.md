@@ -97,11 +97,17 @@ Double-click a result:
   - Replacement links are remembered.
 - Type in **Filter** to find a channel by name, or pick a category.
 - **Watch in VLC** (or double-click), **Copy link** and **● Record** / **■ Stop** work as on the BBC tab.
-- **VLC playlist...** builds one playlist from any of your countries:
+- **Playlist (VLC / Jellyfin)...** builds one playlist from any of your countries:
   - Tick the countries you want, plus the BBC live channels if you like.
   - To choose categories, press a country's **Categories ›** button. Its categories appear on the right with channel counts; click to tick or untick them (e.g. just News and Kids). Each country remembers its own choice for this playlist.
   - Keep **Only channels that play here** ticked to leave out blocked and offline streams.
   - Each country becomes its own group in VLC's playlist (Ctrl+L).
+  - Under **Playlist for**, choose **VLC** or **Jellyfin (M3U tuner)**. A Jellyfin playlist also gives every channel a number, a name, a logo and a unique id. After saving, the app copies the file's location to the clipboard and shows how to add it:
+    1. In Jellyfin, open **Dashboard › Live TV › Tuner Devices › +**.
+    2. Choose **M3U Tuner**.
+    3. Paste the location into **File or URL**, then save.
+
+    If Jellyfin runs on another computer, copy the file there first. Programme guide data isn't included: Jellyfin still lists the channels, and you can add an XMLTV guide under **TV Guide Data Providers**.
 - **Adding a country:** click the **+** tab, type a country's name, then double-click it. **Removing one:** right-click its tab and choose **Close**. Your tabs are remembered.
 - **Unofficial streams are left out.** These are rebroadcasts of paid or DRM-protected channels on third-party servers. The app recognises them by:
   - server: known rebroadcast sites, and streams served from a bare IP address;

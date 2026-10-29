@@ -458,7 +458,7 @@ def _parse_channel_list(url, code):
                     "id": f"{code}:{zlib.crc32(line.encode()):08x}", "title": title or info.group(2), "url": line,
                     "group": "Other" if group in ("", "Undefined") else group.replace(";", ", "),
                     "quality": quality or "", "notes": ", ".join(re.findall(r"\[([^\]]+)\]", notes)),
-                    "tvg_id": attrs.get("tvg-id", ""), "now_title": "",
+                    "tvg_id": attrs.get("tvg-id", ""), "logo": attrs.get("tvg-logo", ""), "now_title": "",
                 })
             info = None
     channels.sort(key=lambda ch: ch["title"].lower())
@@ -557,13 +557,33 @@ def find_new_link(ch):
     return ch["url"] if check_stream(ch["url"], False) == "ok" else None
 
 
-def build_country_playlist(countries, only_playable, replaced, bbc_channels=None):
-    """An .m3u of several countries' channels, grouped by country. countries is a list of
-    (code, name, channels or None to download them, set of categories or None for all).
+def write_m3u(entries, jellyfin=False):
+    """Playlist text for entries of {title, url, group, tvg_id, logo}. For Jellyfin's M3U tuner each
+    channel also gets a number, a name and a unique id, which Jellyfin uses to tell channels apart."""
+    lines, ids = ["#EXTM3U"], set()
+    for number, e in enumerate(entries, 1):
+        tvg_id = e.get("tvg_id", "")
+        if jellyfin:
+            base, n = tvg_id or f"channel{number}", 1
+            tvg_id = base
+            while tvg_id in ids:  # the same channel can be listed more than once
+                n += 1
+                tvg_id = f"{base}-{n}"
+            ids.add(tvg_id)
+        attrs = {"tvg-id": tvg_id, "tvg-name": e["title"] if jellyfin else "", "tvg-logo": e.get("logo", ""),
+                 "tvg-chno": str(number) if jellyfin else "", "group-title": e["group"]}
+        tags = " ".join(f'{k}="{v.replace(chr(34), chr(39))}"' for k, v in attrs.items() if v)
+        lines += [f"#EXTINF:-1 {tags},{e['title']}", e["url"]]
+    return "\n".join(lines) + "\n"
+
+
+def build_country_playlist(countries, only_playable, replaced, bbc_channels=None, jellyfin=False):
+    """An .m3u of several countries' channels, grouped by country, for VLC or Jellyfin. countries is a
+    list of (code, name, channels or None to download them, set of categories or None for all).
     Returns (playlist text, channel count)."""
-    lines = ["#EXTM3U"]
+    entries = []
     if bbc_channels is not None:
-        lines += build_live_playlist(bbc_channels or load_live_channels())[0].splitlines()[1:]
+        entries += _bbc_entries(bbc_channels or load_live_channels())[0]
     for code, name, channels, categories in countries:
         if channels is None:
             channels = load_country_channels(code)[0]
@@ -574,10 +594,9 @@ def build_country_playlist(countries, only_playable, replaced, bbc_channels=None
         if only_playable:
             results = check_all([ch for ch in channels if ch.get("status") not in CHECKED])
             channels = [ch for ch in channels if results.get(ch["id"], ch.get("status")) == "ok"]
-        for ch in channels:
-            lines += [f'#EXTINF:-1 group-title="{name}",{ch["title"]}', ch["url"]]
-    text = "\n".join(lines) + "\n"
-    return text, text.count("#EXTINF")
+        entries += [{"title": ch["title"], "url": ch["url"], "group": name, "tvg_id": ch["tvg_id"],
+                     "logo": ch["logo"]} for ch in channels]
+    return write_m3u(entries, jellyfin), len(entries)
 
 
 def copy_to_windows_clipboard(text):
@@ -612,8 +631,8 @@ def copy_to_windows_clipboard(text):
         return False
 
 
-def build_live_playlist(channels):
-    """An .m3u playlist of every live BBC channel's HLS manifest, for VLC and IPTV players."""
+def _bbc_entries(channels):
+    """Playlist entries for live BBC channels' HLS manifests, and the titles of any with no stream now."""
     def entry(ch):
         try:
             return ch, _live_manifest(ch["id"], "pc", "hls")
@@ -621,12 +640,14 @@ def build_live_playlist(channels):
             return ch, None
     with ThreadPoolExecutor(8) as pool:
         found = list(pool.map(entry, channels))
-    lines = ["#EXTM3U"]
-    for ch, url in found:
-        if url:
-            lines += [f'#EXTINF:-1 tvg-id="{ch["id"]}" group-title="BBC",{ch["title"]}', url]
-    missing = [ch["title"] for ch, url in found if not url]
-    return "\n".join(lines) + "\n", missing
+    entries = [{"title": ch["title"], "url": url, "group": "BBC", "tvg_id": ch["id"]} for ch, url in found if url]
+    return entries, [ch["title"] for ch, url in found if not url]
+
+
+def build_live_playlist(channels):
+    """An .m3u playlist of every live BBC channel's HLS manifest, for VLC and IPTV players."""
+    entries, missing = _bbc_entries(channels)
+    return write_m3u(entries), missing
 
 
 def find_vlc():
@@ -962,7 +983,8 @@ class CountryTab(ttk.Frame):
         ttk.Button(acts, text="Watch in VLC", command=self.watch_in_vlc,
                    state="normal" if find_vlc() else "disabled").pack(side="left")
         ttk.Button(acts, text="Copy link", command=self.copy_link).pack(side="left", padx=4)
-        ttk.Button(acts, text="VLC playlist...", command=lambda: app.playlist_dialog(self.code)).pack(side="left", padx=4)
+        ttk.Button(acts, text="Playlist (VLC / Jellyfin)...",
+                   command=lambda: app.playlist_dialog(self.code)).pack(side="left", padx=4)
         ttk.Label(acts, text="    Record for").pack(side="left")
         self.rec_minutes = tk.StringVar(value="0")
         ttk.Spinbox(acts, from_=0, to=600, increment=15, width=5, textvariable=self.rec_minutes).pack(side="left", padx=4)
@@ -1505,7 +1527,7 @@ class App(tk.Tk):
 
     def playlist_dialog(self, preselect=None):
         win = tk.Toplevel(self)
-        win.title("Make a VLC playlist")
+        win.title("Make a playlist")
         win.transient(self)
         win.resizable(False, False)
         left = ttk.Frame(win)
@@ -1532,9 +1554,16 @@ class App(tk.Tk):
         only_ok = tk.BooleanVar(value=True)
         ttk.Checkbutton(left, text="Only channels that play here", variable=only_ok).grid(
             row=n + 2, column=0, columnspan=3, sticky="w", pady=2)
+        player = tk.StringVar(value=self.cfg.get("playlist_for", "vlc"))
+        formats = ttk.Frame(left)
+        formats.grid(row=n + 3, column=0, columnspan=3, sticky="w", pady=(8, 2))
+        ttk.Label(formats, text="Playlist for:").pack(side="left")
+        ttk.Radiobutton(formats, text="VLC", value="vlc", variable=player).pack(side="left", padx=(8, 4))
+        ttk.Radiobutton(formats, text="Jellyfin (M3U tuner)", value="jellyfin", variable=player).pack(side="left")
         ttk.Label(left, foreground="#555", wraplength=380, justify="left", text=(
-            "Add more countries with the + tab. Each country shows as its own group in VLC (Ctrl+L).")).grid(
-            row=n + 3, column=0, columnspan=3, sticky="w", pady=(4, 0))
+            "Add more countries with the + tab. Each country shows as its own group in VLC (Ctrl+L) and as a "
+            "category in Jellyfin. Jellyfin playlists also number the channels and include their logos.")).grid(
+            row=n + 4, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
         cat_title = ttk.Label(right, text="Categories")
         cat_title.pack(anchor="w")
@@ -1615,12 +1644,16 @@ class App(tk.Tk):
                 messagebox.showinfo(APP_NAME, "Tick at least one country with at least one category.", parent=win)
                 return
             names = [r["name"] for _, r in chosen] + (["BBC"] if bbc.get() else [])
+            jellyfin = player.get() == "jellyfin"
+            app_name = "Jellyfin" if jellyfin else "VLC"
             path = filedialog.asksaveasfilename(
-                parent=win, title="Save VLC playlist", initialdir=self.save_dir.get() or str(Path.home()),
-                initialfile=(names[0] if len(names) == 1 else "World") + " TV.m3u", defaultextension=".m3u",
-                filetypes=[("Playlist", "*.m3u"), ("All files", "*.*")])
+                parent=win, title=f"Save {app_name} playlist", initialdir=self.save_dir.get() or str(Path.home()),
+                initialfile=(names[0] if len(names) == 1 else "World") + (" TV (Jellyfin).m3u" if jellyfin else " TV.m3u"),
+                defaultextension=".m3u", filetypes=[("Playlist", "*.m3u"), ("All files", "*.*")])
             if not path:
                 return
+            self.cfg["playlist_for"] = player.get()
+            self._snapshot_cfg()
             win.destroy()
             countries = [(code, r["name"], r["channels"],
                           None if r["chosen"] is None or len(r["chosen"]) == len(r["groups"]) else set(r["chosen"]))
@@ -1632,13 +1665,27 @@ class App(tk.Tk):
                 text, count = outcome
                 Path(path).write_text(text, encoding="utf-8")
                 self.status.configure(text=f"Saved playlist with {count} channels")
-                self.log(f"Saved VLC playlist with {count} channels ({', '.join(names)}): {path}")
-                vlc = find_vlc()
-                if vlc and messagebox.askyesno(APP_NAME, f"Saved {count} channels.\n\nOpen the playlist in VLC now?"):
-                    subprocess.Popen([vlc, path])
-            self.run_bg(lambda: build_country_playlist(countries, playable, replaced, bbc_channels), saved,
-                        "Building playlist" + (" and checking streams..." if playable else "..."))
-        ttk.Button(left, text="Save playlist...", command=save).grid(row=n + 4, column=0, columnspan=3, sticky="e",
+                self.log(f"Saved {app_name} playlist with {count} channels ({', '.join(names)}): {path}")
+                if jellyfin:
+                    if not copy_to_windows_clipboard(str(Path(path))):
+                        self.clipboard_clear()
+                        self.clipboard_append(str(Path(path)))
+                    messagebox.showinfo(APP_NAME, (
+                        f"Saved {count} channels for Jellyfin. The file's location is on your clipboard.\n\n"
+                        "To add it to Jellyfin:\n"
+                        "1. Dashboard > Live TV > Tuner Devices > +\n"
+                        "2. Tuner type: M3U Tuner\n"
+                        "3. File or URL: paste the location, then Save\n\n"
+                        "If Jellyfin runs on another computer, copy the file there first and use its path on "
+                        "that computer. Programme guide data isn't included; Jellyfin lists the channels "
+                        "without it, or you can add an XMLTV guide under Live TV > TV Guide Data Providers."))
+                else:
+                    vlc = find_vlc()
+                    if vlc and messagebox.askyesno(APP_NAME, f"Saved {count} channels.\n\nOpen the playlist in VLC now?"):
+                        subprocess.Popen([vlc, path])
+            self.run_bg(lambda: build_country_playlist(countries, playable, replaced, bbc_channels, jellyfin),
+                        saved, "Building playlist" + (" and checking streams..." if playable else "..."))
+        ttk.Button(left, text="Save playlist...", command=save).grid(row=n + 5, column=0, columnspan=3, sticky="e",
                                                                     pady=(12, 0))
 
     def _rec_view(self, cid):
