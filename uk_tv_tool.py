@@ -640,6 +640,46 @@ def make_playlist_files(spec, replaced, loaded=None, bbc_channels=None):
     return count, matched
 
 
+DAILY_TASK = "UK TV Tool - TV guide update"
+
+
+def _powershell(script):
+    return subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], capture_output=True,
+                          text=True, timeout=60, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+
+def _ps_quote(text):
+    return "'" + text.replace("'", "''") + "'"
+
+
+def daily_update_time(task=DAILY_TASK):
+    """The time ("HH:MM") the daily guide update runs, or None if it isn't set up."""
+    r = _powershell(f"(Get-ScheduledTask -TaskName {_ps_quote(task)} -ErrorAction Stop).Triggers[0].StartBoundary")
+    m = re.search(r"T(\d\d:\d\d)", r.stdout) if r.returncode == 0 else None
+    return m.group(1) if m else None
+
+
+def set_daily_update(at, task=DAILY_TASK):
+    """Have Windows Task Scheduler run --update-guide every day at "HH:MM", or remove that task (at=None)."""
+    if at is None:
+        _powershell(f"Unregister-ScheduledTask -TaskName {_ps_quote(task)} -Confirm:$false -ErrorAction SilentlyContinue")
+        return
+    exe = Path(sys.executable).with_name("pythonw.exe")
+    script = Path(__file__).resolve()
+    args = '"' + str(script) + '" --update-guide'
+    r = _powershell(
+        f"$a = New-ScheduledTaskAction -Execute {_ps_quote(str(exe if exe.exists() else sys.executable))} "
+        f"-Argument {_ps_quote(args)} -WorkingDirectory {_ps_quote(str(script.parent))}; "
+        f"$t = New-ScheduledTaskTrigger -Daily -At {_ps_quote(at)}; "
+        # Catch up after the computer was off or asleep, and don't let a stuck run hang around.
+        "$s = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries "
+        "-ExecutionTimeLimit (New-TimeSpan -Hours 1); "
+        f"Register-ScheduledTask -TaskName {_ps_quote(task)} -Action $a -Trigger $t -Settings $s "
+        f"-Description {_ps_quote('Remakes the UK TV Tool playlist and TV guide.')} -Force | Out-Null")
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr.strip().splitlines() or ["Task Scheduler refused the task"])[0])
+
+
 # ---------------------------------------------------------------- TV guide (XMLTV)
 # Free channels don't come with guide data, so the guide is put together from the BBC's own schedules
 # and the Pluto TV and Samsung TV Plus guides published at i.mjh.nz. Pluto channels are matched by the
@@ -1165,6 +1205,7 @@ class CountryTab(ttk.Frame):
         ttk.Button(acts, text="Playlist (VLC / Jellyfin)...",
                    command=lambda: app.playlist_dialog(self.code)).pack(side="left", padx=4)
         ttk.Button(acts, text="Update TV guide", command=app.update_guide).pack(side="left", padx=4)
+        ttk.Button(acts, text="Daily update...", command=app.daily_update_dialog).pack(side="left")
         ttk.Label(acts, text="    Record for").pack(side="left")
         self.rec_minutes = tk.StringVar(value="0")
         ttk.Spinbox(acts, from_=0, to=600, increment=15, width=5, textvariable=self.rec_minutes).pack(side="left", padx=4)
@@ -1900,6 +1941,60 @@ class App(tk.Tk):
             return
         loaded = {code: t.channels for code, t in self.country_tabs.items() if t.channels}
         self._make_playlist(spec, loaded)
+
+    def daily_update_dialog(self):
+        win = tk.Toplevel(self)
+        win.title("Daily TV guide update")
+        win.transient(self)
+        win.resizable(False, False)
+        enabled = tk.BooleanVar(value=False)
+        hour, minute = tk.StringVar(value="06"), tk.StringVar(value="00")
+        row = ttk.Frame(win)
+        row.pack(anchor="w", padx=12, pady=(12, 4))
+        ttk.Checkbutton(row, text="Update the playlist and TV guide every day at", variable=enabled).pack(side="left")
+        ttk.Spinbox(row, from_=0, to=23, wrap=True, width=3, format="%02.0f", textvariable=hour).pack(side="left", padx=(6, 0))
+        ttk.Label(row, text=":").pack(side="left")
+        ttk.Spinbox(row, from_=0, to=55, increment=5, wrap=True, width=3, format="%02.0f",
+                    textvariable=minute).pack(side="left")
+        spec = self.cfg.get("last_playlist")
+        ttk.Label(win, foreground="#555", wraplength=440, justify="left", text=(
+            (f"It remakes:\n{spec['playlist']}\n{spec['guide']}\n\n" if spec else
+             "Make a playlist with a TV guide first (\"Playlist (VLC / Jellyfin)...\"), or there's nothing to "
+             "update.\n\n")
+            + "Windows Task Scheduler runs it, even when this app is closed. If the computer is off or asleep "
+            "at that time, it runs as soon as it's back on.")).pack(anchor="w", padx=12, pady=4)
+        state = ttk.Label(win, text="Checking the current setting...")
+        state.pack(anchor="w", padx=12)
+        buttons = ttk.Frame(win)
+        buttons.pack(anchor="e", padx=12, pady=12)
+
+        def current(at):
+            if not win.winfo_exists():
+                return
+            enabled.set(bool(at))
+            if at:
+                hour.set(at[:2])
+                minute.set(at[3:])
+            state.configure(text=f"Currently: every day at {at}" if at else "Currently: off")
+        self.run_bg(daily_update_time, current, "Checking the daily update...")
+
+        def save():
+            try:
+                at = f"{int(float(hour.get())) % 24:02d}:{int(float(minute.get())) % 60:02d}" if enabled.get() else None
+            except ValueError:
+                messagebox.showinfo(APP_NAME, "Enter the time as hours and minutes, e.g. 06:30.", parent=win)
+                return
+            win.destroy()
+
+            def done(_):
+                self.cfg["daily_update"] = at
+                self._snapshot_cfg()
+                text = f"The TV guide will update every day at {at}" if at else "Daily TV guide update turned off"
+                self.status.configure(text=text)
+                self.log(text + ".")
+            self.run_bg(lambda: set_daily_update(at), done, "Setting the daily update...")
+        ttk.Button(buttons, text="Cancel", command=win.destroy).pack(side="right")
+        ttk.Button(buttons, text="Save", command=save).pack(side="right", padx=6)
 
     def _rec_view(self, cid):
         if ":" in cid:

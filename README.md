@@ -117,7 +117,13 @@ Double-click a result:
 
     Other channels are listed without programmes. In a typical UK playlist, about 9 in 10 Pluto channels and 7 in 10 Samsung channels get listings.
   - **Update TV guide** (on any country tab) remakes the last playlist and guide with the same choices, so the listings stay current and the links stay fresh. Do it every day or two.
-  - To update automatically, add a daily task in Windows **Task Scheduler** that runs `pythonw.exe` with the arguments `"<this folder>\uk_tv_tool.py" --update-guide`. It updates the files without opening the window, and records the result in `app.log`.
+  - **Daily update...** (next to it) updates automatically every day:
+    - Tick the box, choose a time, then press **Save**. Untick it to turn the daily update off.
+    - It sets up a Windows Task Scheduler task called *UK TV Tool - TV guide update*, so it runs even when the app is closed.
+    - If the computer is off or asleep at that time, it runs as soon as it's back on.
+    - Each run is recorded in `app.log`.
+
+    The task runs `pythonw.exe "<this folder>\uk_tv_tool.py" --update-guide`. If you move the folder, open **Daily update...** and save again.
 - **Adding a country:** click the **+** tab, type a country's name, then double-click it. **Removing one:** right-click its tab and choose **Close**. Your tabs are remembered.
 - **Unofficial streams are left out.** These are rebroadcasts of paid or DRM-protected channels on third-party servers. The app recognises them by:
   - server: known rebroadcast sites, and streams served from a bare IP address;
