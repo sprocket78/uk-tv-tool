@@ -107,7 +107,17 @@ Double-click a result:
     2. Choose **M3U Tuner**.
     3. Paste the location into **File or URL**, then save.
 
-    If Jellyfin runs on another computer, copy the file there first. Programme guide data isn't included: Jellyfin still lists the channels, and you can add an XMLTV guide under **TV Guide Data Providers**.
+    4. If you made a TV guide (below), add it under **Live TV › TV Guide Data Providers › + › XMLTV**.
+
+    If Jellyfin runs on another computer, copy the files there first.
+  - **Also make a TV guide (XMLTV)** saves a guide next to the playlist, with the same name ending `.xml`, covering the next 3 days. Its channel ids match the playlist, so Jellyfin, Kodi and other IPTV apps line them up automatically. Listings come from:
+    - **BBC:** the BBC's own schedules, when BBC live channels are included.
+    - **Pluto TV channels** in the UK, Ireland, Australia and USA tabs: Pluto's guide, matched exactly by channel id.
+    - **Samsung TV Plus channels** in those tabs: Samsung's guide, matched by name.
+
+    Other channels are listed without programmes. In a typical UK playlist, about 9 in 10 Pluto channels and 7 in 10 Samsung channels get listings.
+  - **Update TV guide** (on any country tab) remakes the last playlist and guide with the same choices, so the listings stay current and the links stay fresh. Do it every day or two.
+  - To update automatically, add a daily task in Windows **Task Scheduler** that runs `pythonw.exe` with the arguments `"<this folder>\uk_tv_tool.py" --update-guide`. It updates the files without opening the window, and records the result in `app.log`.
 - **Adding a country:** click the **+** tab, type a country's name, then double-click it. **Removing one:** right-click its tab and choose **Close**. Your tabs are remembered.
 - **Unofficial streams are left out.** These are rebroadcasts of paid or DRM-protected channels on third-party servers. The app recognises them by:
   - server: known rebroadcast sites, and streams served from a bare IP address;

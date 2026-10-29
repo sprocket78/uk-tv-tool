@@ -16,6 +16,7 @@ iPlayer is UK-only and needs a TV licence.
 
 import atexit
 import collections
+import copy
 import faulthandler
 import json
 import os
@@ -49,6 +50,7 @@ trace(f"starting: {sys.executable} {sys.version.split()[0]} cwd={os.getcwd()}")
 atexit.register(lambda: trace("exited"))
 
 import glob  # noqa: E402
+import gzip  # noqa: E402
 import ipaddress  # noqa: E402
 import itertools  # noqa: E402
 import queue  # noqa: E402
@@ -63,7 +65,7 @@ import urllib.request  # noqa: E402
 import webbrowser  # noqa: E402
 import zlib  # noqa: E402
 from concurrent.futures import ThreadPoolExecutor  # noqa: E402
-from datetime import datetime, timezone  # noqa: E402
+from datetime import datetime, timedelta, timezone  # noqa: E402
 from tkinter import filedialog, messagebox, ttk  # noqa: E402
 
 APP_NAME = "UK TV Tool"
@@ -557,30 +559,39 @@ def find_new_link(ch):
     return ch["url"] if check_stream(ch["url"], False) == "ok" else None
 
 
-def write_m3u(entries, jellyfin=False):
-    """Playlist text for entries of {title, url, group, tvg_id, logo}. For Jellyfin's M3U tuner each
-    channel also gets a number, a name and a unique id, which Jellyfin uses to tell channels apart."""
-    lines, ids = ["#EXTM3U"], set()
+def _assign_ids(entries):
+    """Give every playlist entry a channel number and a unique id, shared by the playlist and its guide.
+    Players such as Jellyfin use the id to tell channels apart and to match them to guide data."""
+    ids = set()
     for number, e in enumerate(entries, 1):
-        tvg_id = e.get("tvg_id", "")
-        if jellyfin:
-            base, n = tvg_id or f"channel{number}", 1
-            tvg_id = base
-            while tvg_id in ids:  # the same channel can be listed more than once
-                n += 1
-                tvg_id = f"{base}-{n}"
-            ids.add(tvg_id)
-        attrs = {"tvg-id": tvg_id, "tvg-name": e["title"] if jellyfin else "", "tvg-logo": e.get("logo", ""),
-                 "tvg-chno": str(number) if jellyfin else "", "group-title": e["group"]}
+        base = e.get("tvg_id") or f"channel{number}"
+        xml_id, n = base, 1
+        while xml_id in ids:  # the same channel can be listed more than once
+            n += 1
+            xml_id = f"{base}-{n}"
+        ids.add(xml_id)
+        e["xml_id"], e["number"] = xml_id, number
+
+
+def write_m3u(entries, jellyfin=False, guide_path=None):
+    """Playlist text for entries of {title, url, group, tvg_id, logo}. For Jellyfin's M3U tuner each
+    channel also gets a number and a name. guide_path points players that read it at the XMLTV guide."""
+    _assign_ids(entries)
+    lines = [f'#EXTM3U x-tvg-url="{guide_path}"' if guide_path else "#EXTM3U"]
+    for e in entries:
+        attrs = {"tvg-id": e["xml_id"], "tvg-name": e["title"] if jellyfin else "", "tvg-logo": e.get("logo", ""),
+                 "tvg-chno": str(e["number"]) if jellyfin else "", "group-title": e["group"]}
         tags = " ".join(f'{k}="{v.replace(chr(34), chr(39))}"' for k, v in attrs.items() if v)
         lines += [f"#EXTINF:-1 {tags},{e['title']}", e["url"]]
     return "\n".join(lines) + "\n"
 
 
-def build_country_playlist(countries, only_playable, replaced, bbc_channels=None, jellyfin=False):
-    """An .m3u of several countries' channels, grouped by country, for VLC or Jellyfin. countries is a
-    list of (code, name, channels or None to download them, set of categories or None for all).
-    Returns (playlist text, channel count)."""
+def build_country_playlist(countries, only_playable, replaced, bbc_channels=None, jellyfin=False,
+                           guide_path=None):
+    """An .m3u of several countries' channels, grouped by country, for VLC or Jellyfin, and optionally an
+    XMLTV guide for them. countries is a list of (code, name, channels or None to download them,
+    set of categories or None for all). Returns (playlist text, channel count, guide or None, channels
+    with guide data)."""
     entries = []
     if bbc_channels is not None:
         entries += _bbc_entries(bbc_channels or load_live_channels())[0]
@@ -594,9 +605,176 @@ def build_country_playlist(countries, only_playable, replaced, bbc_channels=None
         if only_playable:
             results = check_all([ch for ch in channels if ch.get("status") not in CHECKED])
             channels = [ch for ch in channels if results.get(ch["id"], ch.get("status")) == "ok"]
-        entries += [{"title": ch["title"], "url": ch["url"], "group": name, "tvg_id": ch["tvg_id"],
-                     "logo": ch["logo"]} for ch in channels]
-    return write_m3u(entries, jellyfin), len(entries)
+        for ch in channels:
+            pluto = PLUTO_ID_RE.search(ch["url"])
+            if code not in GUIDE_COUNTRIES:
+                guide = ("none",)
+            elif pluto:
+                guide = ("pluto", pluto.group(1))
+            elif "samsung" in ch["url"].lower():
+                guide = ("samsung", _guide_name(ch["title"]))
+            else:
+                guide = ("none",)
+            entries.append({"title": ch["title"], "url": ch["url"], "group": name, "tvg_id": ch["tvg_id"],
+                            "logo": ch["logo"], "guide": guide})
+    text = write_m3u(entries, jellyfin, guide_path)
+    if not guide_path:
+        return text, len(entries), None, 0
+    guide, matched = build_guide(entries)
+    return text, len(entries), guide, matched
+
+
+def make_playlist_files(spec, replaced, loaded=None, bbc_channels=None):
+    """Write the playlist (and guide) a spec describes: {countries: [[code, name, categories or None]],
+    bbc, only_playable, jellyfin, playlist path, guide path or None}. loaded holds channel lists already
+    downloaded, by country. Returns (channel count, channels with guide data)."""
+    loaded = loaded or {}
+    countries = [(code, name, loaded.get(code), None if cats is None else set(cats))
+                 for code, name, cats in spec["countries"]]
+    bbc = (bbc_channels or []) if spec["bbc"] else None
+    text, count, guide, matched = build_country_playlist(countries, spec["only_playable"], replaced, bbc,
+                                                         spec["jellyfin"], spec.get("guide"))
+    Path(spec["playlist"]).write_text(text, encoding="utf-8")
+    if guide:
+        Path(spec["guide"]).write_text(guide, encoding="utf-8")
+    return count, matched
+
+
+# ---------------------------------------------------------------- TV guide (XMLTV)
+# Free channels don't come with guide data, so the guide is put together from the BBC's own schedules
+# and the Pluto TV and Samsung TV Plus guides published at i.mjh.nz. Pluto channels are matched by the
+# channel id in their stream link, Samsung ones by name. Other channels are listed without programmes.
+
+GUIDE_DAYS = 3
+GUIDE_COUNTRIES = {"UK", "IE", "AU", "US"}
+PLUTO_ID_RE = re.compile(r"jmp2\.uk/plu-([0-9a-f]+)")
+PLUTO_GUIDE = "https://i.mjh.nz/PlutoTV/all.xml.gz"
+SAMSUNG_GUIDES = ["https://i.mjh.nz/SamsungTVPlus/{}.xml.gz".format(r) for r in ("gb", "us", "au")]
+
+
+def _xmltv_time(dt):
+    return dt.astimezone(timezone.utc).strftime("%Y%m%d%H%M%S +0000")
+
+
+def _parse_xmltv_time(text):
+    text = text.strip()
+    when = datetime.strptime(text[:14], "%Y%m%d%H%M%S")
+    m = re.search(r"([+-])(\d\d)(\d\d)$", text)
+    offset = (int(m.group(2)) * 60 + int(m.group(3))) * (1 if m.group(1) == "+" else -1) if m else 0
+    return when.replace(tzinfo=timezone(timedelta(minutes=offset)))
+
+
+def _guide_name(title):
+    title = re.sub(r"\([^)]*\)", "", title.lower())
+    return re.sub(r"[^a-z0-9]", "", re.sub(r"\b(hd|uk|tv)\b", "", title))
+
+
+def _scan_xmltv(url, pick, programmes, logos, window):
+    """Stream through a gzipped XMLTV guide. pick(channel id, display names) returns the playlist
+    entries that channel's programmes are for; those inside the time window are added to programmes."""
+    import xml.etree.ElementTree as ET
+    targets = {}
+    with _open(url, timeout=120) as resp, gzip.GzipFile(fileobj=resp) as data:
+        for _, el in ET.iterparse(data, events=("end",)):
+            if el.tag == "channel":
+                found = pick(el.get("id"), [d.text or "" for d in el.findall("display-name")])
+                if found:
+                    targets[el.get("id")] = found
+                    icon = el.find("icon")
+                    for e in found:
+                        if icon is not None and not e.get("logo"):
+                            logos[e["xml_id"]] = icon.get("src", "")
+                el.clear()
+            elif el.tag == "programme":
+                found = targets.get(el.get("channel"))
+                if found:
+                    try:
+                        start, stop = _parse_xmltv_time(el.get("start")), _parse_xmltv_time(el.get("stop"))
+                    except (TypeError, ValueError):
+                        start = stop = None
+                    if start and stop > window[0] and start < window[1]:
+                        for e in found:
+                            programmes[e["xml_id"]].append((start, stop, copy.deepcopy(el)))
+                el.clear()
+
+
+def _bbc_programmes(e, programmes, window):
+    import xml.etree.ElementTree as ET
+    items = ibl_get(f"channels/{e['guide'][1]}/broadcasts", per_page=200).get("broadcasts", {}).get("elements", [])
+    for b in items:
+        start, stop = _when(b["scheduled_start"]), _when(b["scheduled_end"])
+        if not (stop > window[0] and start < window[1]):
+            continue
+        ep = b.get("episode", {})
+        el = ET.Element("programme")
+        ET.SubElement(el, "title", lang="en").text = ep.get("title", "")
+        if ep.get("subtitle"):
+            ET.SubElement(el, "sub-title", lang="en").text = ep["subtitle"]
+        synopsis = ep.get("synopses", {}).get("medium") or ep.get("synopses", {}).get("small")
+        if synopsis:
+            ET.SubElement(el, "desc", lang="en").text = synopsis
+        programmes[e["xml_id"]].append((start, stop, el))
+
+
+def build_guide(entries):
+    """An XMLTV guide for playlist entries (after write_m3u has given them ids).
+    Returns (guide text, number of channels with programmes)."""
+    import xml.etree.ElementTree as ET
+    now = datetime.now(timezone.utc)
+    window = (now - timedelta(hours=2), now + timedelta(days=GUIDE_DAYS))
+    programmes, logos = collections.defaultdict(list), {}
+
+    for e in entries:
+        if e.get("guide", ("",))[0] == "bbc":
+            try:
+                _bbc_programmes(e, programmes, window)
+            except Exception as exc:
+                trace(f"guide: BBC {e['title']}: {exc}")
+
+    by_pluto = collections.defaultdict(list)
+    for e in entries:
+        if e.get("guide", ("",))[0] == "pluto":
+            by_pluto[e["guide"][1]].append(e)
+    if by_pluto:
+        try:
+            _scan_xmltv(PLUTO_GUIDE, lambda cid, names: by_pluto.get(cid), programmes, logos, window)
+        except Exception as exc:
+            trace(f"guide: Pluto TV: {exc}")
+
+    by_samsung = collections.defaultdict(list)
+    for e in entries:
+        if e.get("guide", ("",))[0] == "samsung":
+            by_samsung[e["guide"][1]].append(e)
+
+    def pick_samsung(cid, names):
+        for n in names:
+            found = by_samsung.pop(_guide_name(n), None)  # first region's guide with the name wins
+            if found:
+                return found
+    for url in SAMSUNG_GUIDES:
+        if not by_samsung:
+            break
+        try:
+            _scan_xmltv(url, pick_samsung, programmes, logos, window)
+        except Exception as exc:
+            trace(f"guide: {url}: {exc}")
+
+    root = ET.Element("tv", {"generator-info-name": APP_NAME})
+    for e in entries:
+        ch = ET.SubElement(root, "channel", id=e["xml_id"])
+        ET.SubElement(ch, "display-name").text = e["title"]
+        ET.SubElement(ch, "display-name").text = str(e["number"])
+        if e.get("logo") or logos.get(e["xml_id"]):
+            ET.SubElement(ch, "icon", src=e.get("logo") or logos[e["xml_id"]])
+    matched = 0
+    for e in entries:
+        shows = sorted(programmes.get(e["xml_id"], []), key=lambda p: p[0])
+        matched += bool(shows)
+        for start, stop, el in shows:
+            el.attrib.update(start=_xmltv_time(start), stop=_xmltv_time(stop), channel=e["xml_id"])
+            root.append(el)
+    ET.indent(root, space=" ")
+    return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(root, encoding="unicode") + "\n", matched
 
 
 def copy_to_windows_clipboard(text):
@@ -640,7 +818,8 @@ def _bbc_entries(channels):
             return ch, None
     with ThreadPoolExecutor(8) as pool:
         found = list(pool.map(entry, channels))
-    entries = [{"title": ch["title"], "url": url, "group": "BBC", "tvg_id": ch["id"]} for ch, url in found if url]
+    entries = [{"title": ch["title"], "url": url, "group": "BBC", "tvg_id": ch["id"], "guide": ("bbc", ch["id"])}
+               for ch, url in found if url]
     return entries, [ch["title"] for ch, url in found if not url]
 
 
@@ -985,6 +1164,7 @@ class CountryTab(ttk.Frame):
         ttk.Button(acts, text="Copy link", command=self.copy_link).pack(side="left", padx=4)
         ttk.Button(acts, text="Playlist (VLC / Jellyfin)...",
                    command=lambda: app.playlist_dialog(self.code)).pack(side="left", padx=4)
+        ttk.Button(acts, text="Update TV guide", command=app.update_guide).pack(side="left", padx=4)
         ttk.Label(acts, text="    Record for").pack(side="left")
         self.rec_minutes = tk.StringVar(value="0")
         ttk.Spinbox(acts, from_=0, to=600, increment=15, width=5, textvariable=self.rec_minutes).pack(side="left", padx=4)
@@ -1564,6 +1744,11 @@ class App(tk.Tk):
             "Add more countries with the + tab. Each country shows as its own group in VLC (Ctrl+L) and as a "
             "category in Jellyfin. Jellyfin playlists also number the channels and include their logos.")).grid(
             row=n + 4, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        make_guide = tk.BooleanVar(value=self.cfg.get("make_guide", True))
+        ttk.Checkbutton(left, variable=make_guide, text=(
+            "Also make a TV guide (XMLTV) next to the playlist: BBC, plus Pluto TV and\n"
+            "Samsung TV Plus channels in the UK, Ireland, Australia and USA tabs")).grid(
+            row=n + 5, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
         cat_title = ttk.Label(right, text="Categories")
         cat_title.pack(anchor="w")
@@ -1652,41 +1837,69 @@ class App(tk.Tk):
                 defaultextension=".m3u", filetypes=[("Playlist", "*.m3u"), ("All files", "*.*")])
             if not path:
                 return
-            self.cfg["playlist_for"] = player.get()
+            path = str(Path(path))
+            spec = {
+                "countries": [[code, r["name"], None if r["chosen"] is None or len(r["chosen"]) == len(r["groups"])
+                               else sorted(r["chosen"])] for code, r in chosen],
+                "bbc": bbc.get(), "only_playable": only_ok.get(), "jellyfin": jellyfin,
+                "playlist": path, "guide": str(Path(path).with_suffix(".xml")) if make_guide.get() else None,
+            }
+            self.cfg["playlist_for"], self.cfg["make_guide"] = player.get(), make_guide.get()
+            if spec["guide"]:
+                self.cfg["last_playlist"] = spec  # what "Update TV guide" makes again
             self._snapshot_cfg()
             win.destroy()
-            countries = [(code, r["name"], r["channels"],
-                          None if r["chosen"] is None or len(r["chosen"]) == len(r["groups"]) else set(r["chosen"]))
-                         for code, r in chosen]
-            bbc_channels = list(self.live) if bbc.get() else None
-            replaced, playable = dict(self.cfg.get("replaced_links", {})), only_ok.get()
-
-            def saved(outcome):
-                text, count = outcome
-                Path(path).write_text(text, encoding="utf-8")
-                self.status.configure(text=f"Saved playlist with {count} channels")
-                self.log(f"Saved {app_name} playlist with {count} channels ({', '.join(names)}): {path}")
-                if jellyfin:
-                    if not copy_to_windows_clipboard(str(Path(path))):
-                        self.clipboard_clear()
-                        self.clipboard_append(str(Path(path)))
-                    messagebox.showinfo(APP_NAME, (
-                        f"Saved {count} channels for Jellyfin. The file's location is on your clipboard.\n\n"
-                        "To add it to Jellyfin:\n"
-                        "1. Dashboard > Live TV > Tuner Devices > +\n"
-                        "2. Tuner type: M3U Tuner\n"
-                        "3. File or URL: paste the location, then Save\n\n"
-                        "If Jellyfin runs on another computer, copy the file there first and use its path on "
-                        "that computer. Programme guide data isn't included; Jellyfin lists the channels "
-                        "without it, or you can add an XMLTV guide under Live TV > TV Guide Data Providers."))
-                else:
-                    vlc = find_vlc()
-                    if vlc and messagebox.askyesno(APP_NAME, f"Saved {count} channels.\n\nOpen the playlist in VLC now?"):
-                        subprocess.Popen([vlc, path])
-            self.run_bg(lambda: build_country_playlist(countries, playable, replaced, bbc_channels, jellyfin),
-                        saved, "Building playlist" + (" and checking streams..." if playable else "..."))
-        ttk.Button(left, text="Save playlist...", command=save).grid(row=n + 5, column=0, columnspan=3, sticky="e",
+            self._make_playlist(spec, {code: r["channels"] for code, r in chosen if r["channels"]}, first_time=True)
+        ttk.Button(left, text="Save playlist...", command=save).grid(row=n + 6, column=0, columnspan=3, sticky="e",
                                                                     pady=(12, 0))
+
+    def _make_playlist(self, spec, loaded=None, first_time=False):
+        """Write a playlist (and its guide) in the background, then say how to use it."""
+        replaced = dict(self.cfg.get("replaced_links", {}))
+        bbc_channels = list(self.live) if spec["bbc"] else None
+        app_name = "Jellyfin" if spec["jellyfin"] else "VLC"
+
+        def saved(outcome):
+            count, matched = outcome
+            what = f"{count} channels" + (f", TV guide for {matched}" if spec["guide"] else "")
+            self.status.configure(text=f"Saved playlist: {what}")
+            self.log(f"Saved {app_name} playlist with {what}: {spec['playlist']}"
+                     + (f" and {spec['guide']}" if spec["guide"] else ""))
+            if not first_time:
+                return
+            guide_text = (f"\n\nTV guide ({matched} of {count} channels have listings for the next "
+                          f"{GUIDE_DAYS} days):\n{spec['guide']}\nRefresh it every day or two with "
+                          "\"Update TV guide\" on any country tab.") if spec["guide"] else ""
+            if spec["jellyfin"]:
+                if not copy_to_windows_clipboard(spec["playlist"]):
+                    self.clipboard_clear()
+                    self.clipboard_append(spec["playlist"])
+                messagebox.showinfo(APP_NAME, (
+                    f"Saved {count} channels for Jellyfin. The playlist's location is on your clipboard."
+                    + guide_text + "\n\nTo add them to Jellyfin:\n"
+                    "1. Dashboard > Live TV > Tuner Devices > + > M3U Tuner, paste the playlist's location, Save\n"
+                    + ("2. Live TV > TV Guide Data Providers > + > XMLTV, enter the guide's location, Save\n"
+                       if spec["guide"] else "")
+                    + "\nIf Jellyfin runs on another computer, copy the files there first and use their paths "
+                    "on that computer."))
+            else:
+                vlc = find_vlc()
+                if guide_text:
+                    messagebox.showinfo(APP_NAME, f"Saved {count} channels." + guide_text)
+                if vlc and messagebox.askyesno(APP_NAME, f"Saved {count} channels.\n\nOpen the playlist in VLC now?"):
+                    subprocess.Popen([vlc, spec["playlist"]])
+        self.run_bg(lambda: make_playlist_files(spec, replaced, loaded, bbc_channels), saved,
+                    "Building playlist" + (" and TV guide" if spec["guide"] else "")
+                    + (" (checking streams)..." if spec["only_playable"] else "..."))
+
+    def update_guide(self):
+        spec = self.cfg.get("last_playlist")
+        if not spec:
+            messagebox.showinfo(APP_NAME, "Make a playlist with a TV guide first: press \"Playlist (VLC / "
+                                          "Jellyfin)...\" and tick \"Also make a TV guide\".")
+            return
+        loaded = {code: t.channels for code, t in self.country_tabs.items() if t.channels}
+        self._make_playlist(spec, loaded)
 
     def _rec_view(self, cid):
         if ":" in cid:
@@ -2079,7 +2292,26 @@ class App(tk.Tk):
         self.after(100, self._poll_events)
 
 
+def update_guide_unattended():
+    """--update-guide: remake the last playlist and TV guide without opening the window (for Task Scheduler)."""
+    cfg = load_config()
+    spec = cfg.get("last_playlist")
+    if not spec:
+        trace("--update-guide: no playlist with a TV guide has been made yet")
+        return 1
+    try:
+        count, matched = make_playlist_files(spec, cfg.get("replaced_links", {}))
+    except Exception:
+        import traceback
+        trace("--update-guide failed:\n" + traceback.format_exc())
+        return 1
+    trace(f"--update-guide: {count} channels, TV guide for {matched}: {spec['guide']}")
+    return 0
+
+
 def main():
+    if "--update-guide" in sys.argv:
+        sys.exit(update_guide_unattended())
     # Under pythonw there is no console, so record any startup crash where it can be found.
     try:
         App().mainloop()
