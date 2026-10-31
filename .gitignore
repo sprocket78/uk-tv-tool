@@ -12,3 +12,4 @@ __pycache__/
 
 # Linux Python environment made by setup.sh
 .venv/
+.tools/

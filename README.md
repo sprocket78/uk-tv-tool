@@ -11,7 +11,7 @@ It only downloads and records content that is not DRM-protected: BBC iPlayer and
 
 ## Requirements
 
-- Windows 10 or 11, or Linux (Ubuntu, Debian, Mint, Fedora, Arch and others)
+- Windows 10 or 11, or Linux: Ubuntu 18.04 or later (tested on 18.04, 20.04, 22.04, 24.04, 25.04, 25.10 and 26.04), Debian, Mint, Fedora, Arch and others
 - A UK internet connection (iPlayer is UK-only)
 - A TV licence, which you need to watch or download iPlayer, including live TV
 - Python 3 with Tk, yt-dlp, ffmpeg and, for 1080p, get_iplayer. The setup scripts install all of them.
@@ -61,7 +61,7 @@ In this folder, open a terminal and run:
 
 It works with apt (Ubuntu, Debian, Mint), dnf (Fedora) and pacman (Arch), and asks for your password to install system packages. It installs whatever is missing and skips anything already there:
 - **System packages:** Python with Tk, ffmpeg, the Perl modules get_iplayer needs, and (if available) VLC, xclip and cron.
-- **yt-dlp:** into a private Python environment in this folder (`.venv`), so it doesn't touch your system Python.
+- **yt-dlp:** into a private Python environment in this folder (`.venv`), so it doesn't touch your system Python. yt-dlp needs Python 3.11 or newer; on older systems such as Ubuntu 22.04 and earlier, the script downloads a private Python 3.12 into `.tools` with [uv](https://github.com/astral-sh/uv) (official release, checksum verified). Running it again after a system upgrade is safe: it rebuilds `.venv` only if its Python is too old.
 - **get_iplayer:** the latest release from its official GitHub repository, into `~/.local/bin`.
 - **A menu shortcut:** **UK TV Tool** in your applications menu.
 

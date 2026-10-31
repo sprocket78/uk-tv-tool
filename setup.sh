@@ -49,9 +49,37 @@ else
     python3 -c "import tkinter" 2>/dev/null || exit 1
 fi
 
-step "yt-dlp (in this folder's .venv)"
+step "Python and yt-dlp (in this folder's .venv)"
+# yt-dlp needs Python 3.11 or newer with Tk. Older systems (Ubuntu 22.04 and earlier, for example) get a private
+# Python 3.12 in .tools instead, installed with uv from its official GitHub release, checksum verified.
+new_enough() { "$1" -c 'import sys, tkinter; sys.exit(sys.version_info < (3, 11))' 2>/dev/null; }
+private_python() {
+    local arch uv="$HERE/.tools/uv" url
+    arch="$(uname -m)"
+    url="https://github.com/astral-sh/uv/releases/latest/download/uv-$arch-unknown-linux-gnu.tar.gz"
+    if [ ! -x "$uv" ]; then
+        mkdir -p .tools
+        curl -fsSL "$url" -o .tools/uv.tar.gz
+        [ "$(curl -fsSL "$url.sha256" | cut -d' ' -f1)" = "$(sha256sum .tools/uv.tar.gz | cut -d' ' -f1)" ] ||
+            { echo "uv download failed its checksum"; rm -f .tools/uv.tar.gz; exit 1; }
+        tar -xzf .tools/uv.tar.gz -C .tools --strip-components=1
+        rm .tools/uv.tar.gz
+    fi
+    export UV_PYTHON_INSTALL_DIR="$HERE/.tools/python"
+    "$uv" python install 3.12
+    "$uv" venv --seed --python 3.12 .venv
+}
+if [ -x .venv/bin/python ] && ! new_enough .venv/bin/python; then
+    echo "replacing .venv: its Python is too old for yt-dlp"
+    rm -rf .venv
+fi
 if [ ! -x .venv/bin/python ]; then
-    python3 -m venv .venv
+    if new_enough python3; then
+        python3 -m venv .venv
+    else
+        echo "this system's Python is older than 3.11, which yt-dlp needs, so downloading a private Python 3.12"
+        private_python
+    fi
 fi
 .venv/bin/python -m pip install --upgrade --disable-pip-version-check --quiet -r requirements.txt
 .venv/bin/python -c "import yt_dlp, tkinter; print('yt-dlp', yt_dlp.version.__version__)"
