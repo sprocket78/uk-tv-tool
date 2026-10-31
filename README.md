@@ -178,3 +178,7 @@ Double-click a result:
 - No audio-described versions.
 - Only programmes currently on iPlayer can be listed or downloaded.
 - Live ITV, Channel 4 and Channel 5 aren't included, including in the UK tab, because their online streams use DRM. A Freeview network tuner (e.g. HDHomeRun) would be the way to add them later.
+
+## Licence
+
+MIT. See [LICENSE](LICENSE). It covers this app's code only; programmes and streams belong to their broadcasters.
