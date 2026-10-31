@@ -551,11 +551,11 @@ def check_streams(channels, report, stop):
 
 def check_all(channels):
     """Check channels and wait for the results: {channel id: result}."""
-    results, finished = {}, threading.Event()
+    results, finished, expected = {}, threading.Event(), len({ch["id"] for ch in channels})
 
     def report(cid, result):
         results[cid] = result
-        if len(results) == len(channels):
+        if len(results) == expected:
             finished.set()
     if channels:
         check_streams(channels, report, threading.Event())
@@ -710,8 +710,9 @@ def set_daily_update(at, task=DAILY_TASK):
         lines = [line for line in _crontab() if not line.endswith("# " + task)]
         if at:
             hour, minute = at.split(":")
-            lines.append(f"{int(minute)} {int(hour)} * * * {shlex.quote(sys.executable)} "
-                         f"{shlex.quote(str(Path(__file__).resolve()))} --update-guide >/dev/null 2>&1 # {task}")
+            command = f"{shlex.quote(sys.executable)} {shlex.quote(str(Path(__file__).resolve()))} --update-guide"
+            command = command.replace("%", "\\%")  # cron reads a bare % as a line break
+            lines.append(f"{int(minute)} {int(hour)} * * * {command} >/dev/null 2>&1 # {task}")
         r = subprocess.run(["crontab", "-"], input="\n".join(lines) + "\n" if lines else "", capture_output=True,
                            text=True, timeout=30)
         if r.returncode != 0:
@@ -1129,10 +1130,26 @@ class Downloader(threading.Thread):
                "--force", "--overwrite", "--log-progress"]
         if self.cfg["subtitles"]:
             cmd.append("--subtitles")
+        before = set(folder.glob(glob.escape(name) + ".*"))  # an earlier download of this episode stays
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 stdin=subprocess.DEVNULL, env=env, start_new_session=not IS_WINDOWS,
                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        tail, buf = [], b""
+        output = queue.Queue()
+
+        def read():  # on its own thread, so Cancel works while get_iplayer is quiet (e.g. converting)
+            buf = b""
+            while True:
+                chunk = proc.stdout.read1(4096)
+                if not chunk:
+                    break
+                buf += chunk
+                *lines, buf = re.split(rb"[\r\n]", buf)
+                for raw in lines:
+                    output.put(raw)
+            output.put(buf)
+            output.put(None)
+        threading.Thread(target=read, daemon=True).start()
+        tail = []
         while True:
             if self.cancel.is_set():
                 # get_iplayer runs ffmpeg as a child; stop the whole tree.
@@ -1147,34 +1164,34 @@ class Downloader(threading.Thread):
                         pass
                 proc.wait()
                 # Remove the half-finished pieces (.dash.m4a, .video.m4v, ...).
-                for part in folder.glob(glob.escape(name) + ".*"):
+                for part in set(folder.glob(glob.escape(name) + ".*")) - before:
                     try:
                         part.unlink()
                     except OSError:
                         pass
                 raise Cancelled()
-            chunk = proc.stdout.read1(4096)
-            if not chunk:
+            try:
+                raw = output.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if raw is None:
                 break
-            buf += chunk
-            *lines, buf = re.split(rb"[\r\n]", buf)
-            for raw in lines:
-                line = raw.decode("utf-8", "replace").strip()
-                if not line:
-                    continue
-                m = GIP_PROGRESS_RE.match(line)
-                if m:
-                    pct, speed, eta, stream, part = m.groups()
-                    shown = float(pct) if part == "video" else 0
-                    self.emit("progress", job_index, shown,
-                              f"{float(pct):5.1f}% {part}  {speed} Mb/s  ETA {eta}  ({stream.split('/')[0]})")
-                    continue
-                tail = (tail + [line])[-6:]
-                trace(f"get_iplayer: {line}")
-                if line.startswith(("INFO: Converting", "INFO: Tagging")):
-                    self.emit("progress", job_index, 100, line[6:])
-                elif line.startswith("ERROR"):
-                    self.emit("log", line)
+            line = raw.decode("utf-8", "replace").strip()
+            if not line:
+                continue
+            m = GIP_PROGRESS_RE.match(line)
+            if m:
+                pct, speed, eta, stream, part = m.groups()
+                shown = float(pct) if part == "video" else 0
+                self.emit("progress", job_index, shown,
+                          f"{float(pct):5.1f}% {part}  {speed} Mb/s  ETA {eta}  ({stream.split('/')[0]})")
+                continue
+            tail = (tail + [line])[-6:]
+            trace(f"get_iplayer: {line}")
+            if line.startswith(("INFO: Converting", "INFO: Tagging")):
+                self.emit("progress", job_index, 100, line[6:])
+            elif line.startswith("ERROR"):
+                self.emit("log", line)
         if proc.wait() != 0:
             raise RuntimeError(" / ".join(tail[-3:]) or f"get_iplayer exit code {proc.returncode}")
 
@@ -1499,7 +1516,7 @@ class App(tk.Tk):
         self.programmes, self.episodes = [], []
         self.checked = set()
         self.worker = None
-        self.job_rows = []
+        self.job_rows, self.job_episodes = [], None
         self.everywhere_results = []
         self.live = []
         self.recorders = {}
@@ -2171,7 +2188,7 @@ class App(tk.Tk):
                     f"Opening {ch['title']}...")
 
     def _copy(self, text, what):
-        # Tk empties the clipboard when the app closes, so use Windows' own clipboard where possible.
+        # Tk empties the clipboard when the app closes, so use the system clipboard where possible.
         if not copy_to_clipboard(text):
             self.clipboard_clear()
             self.clipboard_append(text)
@@ -2405,6 +2422,7 @@ class App(tk.Tk):
             messagebox.showerror(APP_NAME, "Choose a folder to save to.")
             return
         self.job_rows = [str(self.episodes.index(j)) for j in jobs]
+        self.job_episodes = self.episodes
         self.overall.configure(maximum=len(jobs) * 100, value=0)
         self.download_btn.configure(state="disabled")
         self.cancel_btn.configure(state="normal")
@@ -2420,50 +2438,58 @@ class App(tk.Tk):
     def _poll_events(self):
         try:
             while True:
-                kind, *args = self.events.get_nowait()
-                if kind == "call":
-                    done, result, error = args
-                    self.search_btn.configure(state="normal")
-                    self.all_search_btn.configure(state="normal")
-                    if error:
-                        self.status.configure(text="")
-                        self.log(f"Error: {error}")
-                    else:
-                        done(result)
-                elif kind == "progress":
-                    i, pct, text = args
-                    self.overall.configure(value=i * 100 + pct)
-                    self.status.configure(text=f"[{i + 1}/{len(self.job_rows)}] {text}")
-                elif kind == "status":
-                    i, text = args
-                    row = self.job_rows[i]
-                    self.ep_list.set(row, "available", text)
-                    if text in ("Done", "Failed", "Cancelled"):
-                        self.overall.configure(value=(i + 1) * 100)
-                elif kind == "log":
-                    self.log(args[0])
-                elif kind == "country":
-                    code, method, call_args = args
-                    if code in self.country_tabs:
-                        getattr(self.country_tabs[code], method)(*call_args)
-                elif kind == "rec":
-                    cid, text = args
-                    view = self._rec_view(cid)
-                    if view and view.exists(cid):
-                        view.set(cid, "rec", text)
-                elif kind == "rec_done":
-                    cid, text = args
-                    view = self._rec_view(cid)
-                    if view and view.exists(cid):
-                        view.set(cid, "rec", "")
-                    self.log(text)
-                elif kind == "finished":
-                    self.download_btn.configure(state="normal")
-                    self.cancel_btn.configure(state="disabled")
-                    self.status.configure(text="Finished")
+                try:
+                    self._handle_event(*self.events.get_nowait())
+                except queue.Empty:
+                    raise
+                except Exception:  # one bad update mustn't stop every later one
+                    self.report_callback_exception(*sys.exc_info())
         except queue.Empty:
             pass
         self.after(100, self._poll_events)
+
+    def _handle_event(self, kind, *args):
+        if kind == "call":
+            done, result, error = args
+            self.search_btn.configure(state="normal")
+            self.all_search_btn.configure(state="normal")
+            if error:
+                self.status.configure(text="")
+                self.log(f"Error: {error}")
+            else:
+                done(result)
+        elif kind == "progress":
+            i, pct, text = args
+            self.overall.configure(value=i * 100 + pct)
+            self.status.configure(text=f"[{i + 1}/{len(self.job_rows)}] {text}")
+        elif kind == "status":
+            i, text = args
+            row = self.job_rows[i]
+            if self.episodes is self.job_episodes:  # not if another programme is showing now
+                self.ep_list.set(row, "available", text)
+            if text in ("Done", "Failed", "Cancelled"):
+                self.overall.configure(value=(i + 1) * 100)
+        elif kind == "log":
+            self.log(args[0])
+        elif kind == "country":
+            code, method, call_args = args
+            if code in self.country_tabs:
+                getattr(self.country_tabs[code], method)(*call_args)
+        elif kind == "rec":
+            cid, text = args
+            view = self._rec_view(cid)
+            if view and view.exists(cid):
+                view.set(cid, "rec", text)
+        elif kind == "rec_done":
+            cid, text = args
+            view = self._rec_view(cid)
+            if view and view.exists(cid):
+                view.set(cid, "rec", "")
+            self.log(text)
+        elif kind == "finished":
+            self.download_btn.configure(state="normal")
+            self.cancel_btn.configure(state="disabled")
+            self.status.configure(text="Finished")
 
 
 def update_guide_unattended():
