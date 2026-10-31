@@ -1,4 +1,4 @@
-"""UK TV Tool - a Windows app for UK free-to-air TV.
+"""UK TV Tool - a Windows and Linux app for UK free-to-air TV.
 
 * BBC iPlayer downloads: search, tick episodes, download up to 1080p
   (get_iplayer for 1080p, yt-dlp for the rest), copy manifest links.
@@ -24,8 +24,12 @@ import sys
 import time
 from pathlib import Path
 
-# Kept as "iplayer-dl" so settings from earlier versions carry over.
-CONFIG_PATH = Path(os.environ.get("APPDATA", Path.home())) / "iplayer-dl" / "config.json"
+IS_WINDOWS = sys.platform == "win32"
+# Windows keeps "iplayer-dl" so settings from earlier versions carry over; Linux follows the XDG layout.
+if IS_WINDOWS:
+    CONFIG_PATH = Path(os.environ.get("APPDATA", Path.home())) / "iplayer-dl" / "config.json"
+else:
+    CONFIG_PATH = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "uk-tv-tool" / "config.json"
 LOG_PATH = CONFIG_PATH.parent / "app.log"
 LOG_MAX_BYTES = 1_000_000
 
@@ -79,7 +83,9 @@ except ImportError:
     messagebox.showerror(APP_NAME,
                          "yt-dlp is not installed for this Python.\n\nRun setup.ps1, or open a command prompt "
                          "and run:\n"
-                         f'"{sys.executable.replace("pythonw", "python")}" -s -m pip install yt-dlp')
+                         f'"{sys.executable.replace("pythonw", "python")}" -s -m pip install yt-dlp'
+                         if IS_WINDOWS else
+                         "yt-dlp is not installed for this Python.\n\nRun ./setup.sh in the app's folder.")
     raise
 
 IBL = "https://ibl.api.bbci.co.uk/ibl/v1"
@@ -175,7 +181,7 @@ def episode_manifests(pid):
 
 def find_ffmpeg():
     found = shutil.which("ffmpeg")
-    if found:
+    if found or not IS_WINDOWS:
         return found
     # winget installs add ffmpeg to PATH only for shells started afterwards.
     winget = Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet"
@@ -183,8 +189,8 @@ def find_ffmpeg():
     return next((str(p) for p in candidates if p.exists()), None)
 
 
-def find_get_iplayer():
-    """Return the get_iplayer install folder (holding perl\\bin and get_iplayer.pl), or None."""
+def _get_iplayer_folder():
+    """Windows: the get_iplayer install folder (holding perl\\bin and get_iplayer.pl), or None."""
     candidates = [Path(os.environ.get(var, "")) / "get_iplayer"
                   for var in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA")]
     found = shutil.which("get_iplayer")
@@ -192,6 +198,25 @@ def find_get_iplayer():
         candidates.insert(0, Path(found).parent)
     return next((p for p in candidates if (p / "get_iplayer.pl").exists()
                  and (p / "perl" / "bin" / "perl.exe").exists()), None)
+
+
+def find_get_iplayer():
+    """Return (command, environment) to run get_iplayer with, or None if it isn't installed."""
+    if IS_WINDOWS:
+        gip = _get_iplayer_folder()
+        if not gip:
+            return None
+        # Same environment get_iplayer.cmd sets up: its own perl and its bundled ffmpeg.
+        env = dict(os.environ, PERL5LIB="",
+                   PATH=os.pathsep.join([str(gip / "perl" / "bin"), str(gip / "utils" / "bin"),
+                                         os.environ.get("PATH", "")]))
+        return [str(gip / "perl" / "bin" / "perl.exe"), str(gip / "get_iplayer.pl")], env
+    # Linux: setup.sh puts it in ~/.local/bin, which a desktop launcher may not have on PATH.
+    found = shutil.which("get_iplayer") or shutil.which("get-iplayer")
+    local = Path.home() / ".local" / "bin" / "get_iplayer"
+    if not found and local.exists():
+        found = str(local)
+    return ([found], dict(os.environ)) if found else None
 
 
 def safe_name(text):
@@ -652,15 +677,46 @@ def _ps_quote(text):
     return "'" + text.replace("'", "''") + "'"
 
 
+def _crontab():
+    """Linux: the user's crontab lines (empty if they have none)."""
+    if not shutil.which("crontab"):
+        raise RuntimeError("cron isn't installed - install the \"cron\" (or \"cronie\") package")
+    r = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=30)
+    return r.stdout.splitlines() if r.returncode == 0 else []
+
+
 def daily_update_time(task=DAILY_TASK):
     """The time ("HH:MM") the daily guide update runs, or None if it isn't set up."""
+    if not IS_WINDOWS:
+        try:
+            lines = _crontab()
+        except RuntimeError:
+            return None
+        for line in lines:  # "MM HH * * * command # task"
+            m = re.match(r"(\d+) (\d+) \* \* \* .*# " + re.escape(task) + "$", line)
+            if m:
+                return f"{int(m.group(2)):02d}:{int(m.group(1)):02d}"
+        return None
     r = _powershell(f"(Get-ScheduledTask -TaskName {_ps_quote(task)} -ErrorAction Stop).Triggers[0].StartBoundary")
     m = re.search(r"T(\d\d:\d\d)", r.stdout) if r.returncode == 0 else None
     return m.group(1) if m else None
 
 
 def set_daily_update(at, task=DAILY_TASK):
-    """Have Windows Task Scheduler run --update-guide every day at "HH:MM", or remove that task (at=None)."""
+    """Run --update-guide every day at "HH:MM", or stop doing so (at=None). Windows uses Task Scheduler;
+    Linux a line in the user's crontab, marked with the task name so only that line is ever changed."""
+    if not IS_WINDOWS:
+        import shlex
+        lines = [line for line in _crontab() if not line.endswith("# " + task)]
+        if at:
+            hour, minute = at.split(":")
+            lines.append(f"{int(minute)} {int(hour)} * * * {shlex.quote(sys.executable)} "
+                         f"{shlex.quote(str(Path(__file__).resolve()))} --update-guide >/dev/null 2>&1 # {task}")
+        r = subprocess.run(["crontab", "-"], input="\n".join(lines) + "\n" if lines else "", capture_output=True,
+                           text=True, timeout=30)
+        if r.returncode != 0:
+            raise RuntimeError(r.stderr.strip() or "cron refused the change")
+        return
     if at is None:
         _powershell(f"Unregister-ScheduledTask -TaskName {_ps_quote(task)} -Confirm:$false -ErrorAction SilentlyContinue")
         return
@@ -817,8 +873,21 @@ def build_guide(entries):
     return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(root, encoding="unicode") + "\n", matched
 
 
-def copy_to_windows_clipboard(text):
-    """Put text on the Windows clipboard so it stays there after the app closes. Returns False if it can't."""
+def copy_to_clipboard(text):
+    """Put text on the system clipboard so it stays there after the app closes. Returns False if it can't."""
+    if not IS_WINDOWS:
+        # Tk's own clipboard empties when the app quits, so hand the text to a clipboard tool.
+        tools = [["wl-copy"]] if os.environ.get("WAYLAND_DISPLAY") else []
+        tools += [["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]]
+        for tool in tools:
+            if shutil.which(tool[0]):
+                try:
+                    subprocess.run(tool, input=text.encode(), timeout=5, check=True,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    return True
+                except (OSError, subprocess.SubprocessError):
+                    pass
+        return False
     try:
         import ctypes
         from ctypes import wintypes
@@ -870,7 +939,7 @@ def build_live_playlist(channels):
 
 
 def find_vlc():
-    for base in (os.environ.get("ProgramFiles", ""), os.environ.get("ProgramFiles(x86)", "")):
+    for base in (os.environ.get("ProgramFiles", ""), os.environ.get("ProgramFiles(x86)", "")) if IS_WINDOWS else ():
         exe = Path(base) / "VideoLAN" / "VLC" / "vlc.exe"
         if exe.exists():
             return str(exe)
@@ -880,7 +949,7 @@ def find_vlc():
 def find_any_ffmpeg():
     if find_ffmpeg():
         return find_ffmpeg()
-    gip = find_get_iplayer()
+    gip = _get_iplayer_folder() if IS_WINDOWS else None
     bundled = gip / "utils" / "bin" / "ffmpeg.exe" if gip else None
     return str(bundled) if bundled and bundled.exists() else None
 
@@ -1053,24 +1122,29 @@ class Downloader(threading.Thread):
         """Download one episode with get_iplayer, best quality first (1080p, then 720p...)."""
         folder, name = self._paths(ep, self.cfg["save_dir"])
         folder.mkdir(parents=True, exist_ok=True)
-        # Same environment get_iplayer.cmd sets up: its own perl and its bundled ffmpeg.
-        env = dict(os.environ, PATH=f"{gip / 'perl' / 'bin'};{gip / 'utils' / 'bin'};{os.environ.get('PATH', '')}",
-                   PERL5LIB="")
-        cmd = [str(gip / "perl" / "bin" / "perl.exe"), str(gip / "get_iplayer.pl"),
+        command, env = gip
+        cmd = [*command,
                "--pid", ep["id"], "--type=tv", "--tv-quality=fhd,hd,sd,web,mobile",
                "--output", str(folder), "--file-prefix", name, "--whitespace",
                "--force", "--overwrite", "--log-progress"]
         if self.cfg["subtitles"]:
             cmd.append("--subtitles")
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                stdin=subprocess.DEVNULL, env=env,
+                                stdin=subprocess.DEVNULL, env=env, start_new_session=not IS_WINDOWS,
                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         tail, buf = [], b""
         while True:
             if self.cancel.is_set():
                 # get_iplayer runs ffmpeg as a child; stop the whole tree.
-                subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True,
-                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                if IS_WINDOWS:
+                    subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True,
+                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                else:
+                    import signal
+                    try:
+                        os.killpg(proc.pid, signal.SIGTERM)
+                    except OSError:
+                        pass
                 proc.wait()
                 # Remove the half-finished pieces (.dash.m4a, .video.m4v, ...).
                 for part in folder.glob(glob.escape(name) + ".*"):
@@ -1418,6 +1492,8 @@ class App(tk.Tk):
         self.title(APP_NAME)
         self.geometry("1150x760")
         self.minsize(860, 600)
+        if not IS_WINDOWS and "clam" in ttk.Style(self).theme_names():
+            ttk.Style(self).theme_use("clam")  # Tk's default Linux look is very dated
         self.cfg = load_config()
         self.events = queue.Queue()
         self.programmes, self.episodes = [], []
@@ -1438,7 +1514,7 @@ class App(tk.Tk):
         trace("window ready")
         if not find_ffmpeg():
             self.log("Warning: ffmpeg not found - downloads cannot be merged. Install it with: "
-                     "winget install Gyan.FFmpeg")
+                     + ("winget install Gyan.FFmpeg" if IS_WINDOWS else "./setup.sh, or your package manager"))
 
     # -- layout
     @staticmethod
@@ -1912,7 +1988,7 @@ class App(tk.Tk):
                           f"{GUIDE_DAYS} days):\n{spec['guide']}\nRefresh it every day or two with "
                           "\"Update TV guide\" on any country tab.") if spec["guide"] else ""
             if spec["jellyfin"]:
-                if not copy_to_windows_clipboard(spec["playlist"]):
+                if not copy_to_clipboard(spec["playlist"]):
                     self.clipboard_clear()
                     self.clipboard_append(spec["playlist"])
                 messagebox.showinfo(APP_NAME, (
@@ -1961,8 +2037,11 @@ class App(tk.Tk):
             (f"It remakes:\n{spec['playlist']}\n{spec['guide']}\n\n" if spec else
              "Make a playlist with a TV guide first (\"Playlist (VLC / Jellyfin)...\"), or there's nothing to "
              "update.\n\n")
-            + "Windows Task Scheduler runs it, even when this app is closed. If the computer is off or asleep "
-            "at that time, it runs as soon as it's back on.")).pack(anchor="w", padx=12, pady=4)
+            + ("Windows Task Scheduler runs it, even when this app is closed. If the computer is off or asleep "
+               "at that time, it runs as soon as it's back on." if IS_WINDOWS else
+               "cron runs it, even when this app is closed. If the computer is off or asleep at that time, "
+               "that day's update is skipped; the guide covers 3 days, so pick a time it's usually on.")
+        )).pack(anchor="w", padx=12, pady=4)
         state = ttk.Label(win, text="Checking the current setting...")
         state.pack(anchor="w", padx=12)
         buttons = ttk.Frame(win)
@@ -2093,7 +2172,7 @@ class App(tk.Tk):
 
     def _copy(self, text, what):
         # Tk empties the clipboard when the app closes, so use Windows' own clipboard where possible.
-        if not copy_to_windows_clipboard(text):
+        if not copy_to_clipboard(text):
             self.clipboard_clear()
             self.clipboard_append(text)
             self.update()
@@ -2388,7 +2467,7 @@ class App(tk.Tk):
 
 
 def update_guide_unattended():
-    """--update-guide: remake the last playlist and TV guide without opening the window (for Task Scheduler)."""
+    """--update-guide: remake the last playlist and TV guide without opening the window (for Task Scheduler or cron)."""
     cfg = load_config()
     spec = cfg.get("last_playlist")
     if not spec:

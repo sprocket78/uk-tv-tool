@@ -1,6 +1,6 @@
 # UK TV Tool
 
-A Windows desktop app for UK free-to-air TV:
+A desktop app for UK free-to-air TV, for Windows and Linux:
 
 - **BBC iPlayer downloads.** Search iPlayer, tick episodes and download them in up to 1080p with subtitles.
 - **Search all channels.** One search across BBC iPlayer, ITVX, Channel 4, My5, STV Player and U.
@@ -11,12 +11,13 @@ It only downloads and records content that is not DRM-protected: BBC iPlayer and
 
 ## Requirements
 
-- Windows 10 or 11 and a UK internet connection (iPlayer is UK-only)
+- Windows 10 or 11, or Linux (Ubuntu, Debian, Mint, Fedora, Arch and others)
+- A UK internet connection (iPlayer is UK-only)
 - A TV licence, which you need to watch or download iPlayer, including live TV
-- Python 3.12, yt-dlp, ffmpeg and, for 1080p, get_iplayer. `setup.ps1` installs all of them.
+- Python 3 with Tk, yt-dlp, ffmpeg and, for 1080p, get_iplayer. The setup scripts install all of them.
 - VLC (optional), for **Watch in VLC** and the playlist
 
-## Setup
+## Setup on Windows
 
 In this folder, open PowerShell and run:
 
@@ -49,6 +50,28 @@ For 1080p, install get_iplayer from <https://github.com/get-iplayer/get_iplayer_
 
 Install yt-dlp with `-s` and **not** with `--user`. A per-user copy isn't visible when the app is double-clicked, and the app then closes immediately.
 </details>
+
+## Setup on Linux
+
+In this folder, open a terminal and run:
+
+```bash
+./setup.sh
+```
+
+It works with apt (Ubuntu, Debian, Mint), dnf (Fedora) and pacman (Arch), and asks for your password to install system packages. It installs whatever is missing and skips anything already there:
+- **System packages:** Python with Tk, ffmpeg, the Perl modules get_iplayer needs, and (if available) VLC, xclip and cron.
+- **yt-dlp:** into a private Python environment in this folder (`.venv`), so it doesn't touch your system Python.
+- **get_iplayer:** the latest release from its official GitHub repository, into `~/.local/bin`.
+- **A menu shortcut:** **UK TV Tool** in your applications menu.
+
+Then start **UK TV Tool** from the menu, or run `./uk-tv-tool.sh`.
+
+Differences from Windows:
+- Settings and `app.log` are in `~/.config/uk-tv-tool`.
+- **Copy link** uses `wl-copy` (Wayland), `xclip` or `xsel`, so copied links stay on the clipboard after the app closes.
+- **Daily update...** adds a line to your crontab, marked `# UK TV Tool - TV guide update`; the app only ever changes that line. Unlike Windows, cron doesn't catch up on a run missed while the computer was off, so pick a time it's usually on.
+- On Fedora, `ffmpeg-free` is installed. VLC needs the RPM Fusion repository there.
 
 ## Using it
 
@@ -119,11 +142,11 @@ Double-click a result:
   - **Update TV guide** (on any country tab) remakes the last playlist and guide with the same choices, so the listings stay current and the links stay fresh. Do it every day or two.
   - **Daily update...** (next to it) updates automatically every day:
     - Tick the box, choose a time, then press **Save**. Untick it to turn the daily update off.
-    - It sets up a Windows Task Scheduler task called *UK TV Tool - TV guide update*, so it runs even when the app is closed.
-    - If the computer is off or asleep at that time, it runs as soon as it's back on.
+    - On Windows it sets up a Task Scheduler task called *UK TV Tool - TV guide update*, so it runs even when the app is closed. If the computer is off or asleep at that time, it runs as soon as it's back on.
+    - On Linux it adds a line to your crontab instead (see *Setup on Linux*).
     - Each run is recorded in `app.log`.
 
-    The task runs `pythonw.exe "<this folder>\uk_tv_tool.py" --update-guide`. If you move the folder, open **Daily update...** and save again.
+    It runs `uk_tv_tool.py --update-guide`. If you move the folder, open **Daily update...** and save again.
 - **Adding a country:** click the **+** tab, type a country's name, then double-click it. **Removing one:** right-click its tab and choose **Close**. Your tabs are remembered.
 - **Unofficial streams are left out.** These are rebroadcasts of paid or DRM-protected channels on third-party servers. The app recognises them by:
   - server: known rebroadcast sites, and streams served from a bare IP address;
@@ -134,14 +157,20 @@ Double-click a result:
 
 ## Troubleshooting
 
-- **Downloads start failing.** The BBC changes iPlayer from time to time. Update yt-dlp first:
+- **Downloads start failing.** The BBC changes iPlayer from time to time. Update yt-dlp first. On Windows:
 
   ```bash
   python -s -m pip install --upgrade yt-dlp
   ```
 
-- **The app closes straight away.** Run **UK TV Tool (debug).bat** to see the error, or read `%APPDATA%\iplayer-dl\app.log`. The log records every start, error and exit.
-- **Settings** are stored in `%APPDATA%\iplayer-dl\config.json`.
+  On Linux, in this folder:
+
+  ```bash
+  .venv/bin/python -m pip install --upgrade yt-dlp
+  ```
+
+- **The app closes straight away.** On Windows, run **UK TV Tool (debug).bat** to see the error. On Linux, run `./uk-tv-tool.sh` from a terminal. Either way, the log records every start, error and exit: `%APPDATA%\iplayer-dl\app.log` on Windows, `~/.config/uk-tv-tool/app.log` on Linux.
+- **Settings** are stored in `config.json` in the same folder as the log.
 
 ## Limits
 

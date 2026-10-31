@@ -2,3 +2,5 @@
 # cmd.exe misreads batch files with LF line endings
 *.bat text eol=crlf
 *.ps1 text eol=crlf
+# Linux shells need LF line endings
+*.sh text eol=lf

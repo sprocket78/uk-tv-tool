@@ -9,3 +9,6 @@ __pycache__/
 *.srt
 *.m3u
 *.log
+
+# Linux Python environment made by setup.sh
+.venv/
