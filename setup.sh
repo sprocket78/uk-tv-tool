@@ -28,7 +28,9 @@ elif command -v dnf >/dev/null; then
     install() { $SUDO dnf install -y "$@"; }
 elif command -v pacman >/dev/null; then
     PM="pacman"
-    REQUIRED="python tk ffmpeg curl perl perl-libwww perl-lwp-protocol-https perl-mojolicious perl-xml-libxml perl-cgi"
+    # Mojolicious isn't in Arch's own repositories, so it comes from CPAN below.
+    REQUIRED="python tk ffmpeg curl perl perl-libwww perl-lwp-protocol-https perl-xml-libxml perl-cgi cpanminus make
+              ttf-dejavu"
     OPTIONAL="vlc xclip cronie atomicparsley"
     install() { $SUDO pacman -S --needed --noconfirm "$@"; }
 else
@@ -39,6 +41,9 @@ step "System packages"
 if [ -n "$PM" ]; then
     # shellcheck disable=SC2086
     install $REQUIRED
+    if [ "$PM" = "pacman" ] && ! perl -MMojolicious -e1 2>/dev/null; then
+        $SUDO "$(command -v cpanm || echo /usr/bin/vendor_perl/cpanm)" --notest --quiet Mojolicious
+    fi
     for pkg in $OPTIONAL; do
         install "$pkg" >/dev/null 2>&1 && echo "$pkg: ok" || echo "$pkg: skipped (not available here)"
     done

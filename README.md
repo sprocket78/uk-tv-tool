@@ -11,7 +11,7 @@ It only downloads and records content that is not DRM-protected: BBC iPlayer and
 
 ## Requirements
 
-- Windows 10 or 11, or Linux: Ubuntu 18.04 or later (tested on 18.04, 20.04, 22.04, 24.04, 25.04, 25.10 and 26.04), Debian, Mint, Fedora, Arch and others
+- Windows 10 or 11, or Linux: Ubuntu 18.04 or later (tested on 18.04, 20.04, 22.04, 24.04, 25.04, 25.10 and 26.04), Debian 12 and 13, Linux Mint 22, Fedora 43 and Arch
 - A UK internet connection (iPlayer is UK-only)
 - A TV licence, which you need to watch or download iPlayer, including live TV
 - Python 3 with Tk, yt-dlp, ffmpeg and, for 1080p, get_iplayer. The setup scripts install all of them.
@@ -71,7 +71,8 @@ Differences from Windows:
 - Settings and `app.log` are in `~/.config/uk-tv-tool`.
 - **Copy link** uses `wl-copy` (Wayland), `xclip` or `xsel`, so copied links stay on the clipboard after the app closes.
 - **Daily update...** adds a line to your crontab, marked `# UK TV Tool - TV guide update`; the app only ever changes that line. Unlike Windows, cron doesn't catch up on a run missed while the computer was off, so pick a time it's usually on.
-- On Fedora, `ffmpeg-free` is installed. VLC needs the RPM Fusion repository there.
+- On Fedora, `ffmpeg-free` is installed.
+- On Arch, the Mojolicious Perl module isn't in the official repositories, so setup installs it from CPAN with `cpanm`.
 
 ## Using it
 

@@ -746,7 +746,7 @@ GUIDE_DAYS = 3
 GUIDE_COUNTRIES = {"UK", "IE", "AU", "US"}
 PLUTO_ID_RE = re.compile(r"jmp2\.uk/plu-([0-9a-f]+)")
 PLUTO_GUIDE = "https://i.mjh.nz/PlutoTV/all.xml.gz"
-SAMSUNG_GUIDES = ["https://i.mjh.nz/SamsungTVPlus/{}.xml.gz".format(r) for r in ("gb", "us", "au")]
+SAMSUNG_GUIDES = ["https://i.mjh.nz/SamsungTVPlus/{}.xml.gz".format(r) for r in ("gb", "us")]  # Australian channels match by name in these
 
 
 def _xmltv_time(dt):
